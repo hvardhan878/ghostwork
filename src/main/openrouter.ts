@@ -81,11 +81,26 @@ export async function promptJSON<T>(prompt: string): Promise<T | null> {
   const result = await chat([{ role: "user", content: prompt }], true);
   if (!result) return null;
   try {
-    return JSON.parse(result.content) as T;
+    return JSON.parse(extractJSON(result.content)) as T;
   } catch {
     console.error("[openrouter] Failed to parse JSON response:", result.content);
     return null;
   }
+}
+
+function extractJSON(content: string): string {
+  const trimmed = content.trim();
+
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) return fenced[1].trim();
+
+  const firstObject = trimmed.indexOf("{");
+  const lastObject = trimmed.lastIndexOf("}");
+  if (firstObject !== -1 && lastObject > firstObject) {
+    return trimmed.slice(firstObject, lastObject + 1);
+  }
+
+  return trimmed;
 }
 
 /** Send a test prompt to confirm the API key and endpoint work. */

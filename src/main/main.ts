@@ -350,8 +350,8 @@ app.whenReady().then(async () => {
   createWindow();
   scheduleJobs();
 
-  // Start Screenpipe daemon (downloads via npx on first run)
-  initScreenpipeManager(() => mainWindow);
+  // Start Screenpipe daemon and inject its auth token before any /search calls.
+  await initScreenpipeManager(() => mainWindow);
 
   startActionEngine(() => mainWindow);
 

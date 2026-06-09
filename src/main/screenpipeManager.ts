@@ -21,9 +21,9 @@ let getWin: (() => BrowserWindow | null) | null = null;
 
 export function initScreenpipeManager(
   windowGetter: () => BrowserWindow | null
-): void {
+): Promise<void> {
   getWin = windowGetter;
-  ensureRunning();
+  return ensureRunning();
 }
 
 export function stopScreenpipeManager(): void {
@@ -48,7 +48,7 @@ async function ensureRunning(): Promise<void> {
   launch();
 }
 
-function launch(): void {
+async function launch(): Promise<void> {
   if (stopping) return;
   console.log("[screenpipe-mgr] Launching screenpipe …");
   notify("status", { running: false, message: "Starting Screenpipe…" });
@@ -104,7 +104,7 @@ function launch(): void {
   });
 
   // Poll until the API is ready, then tell the renderer
-  waitUntilReady();
+  await waitUntilReady();
 }
 
 async function waitUntilReady(): Promise<void> {
