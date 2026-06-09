@@ -6,6 +6,22 @@
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const MODEL = "anthropic/claude-sonnet-4-5";
 
+/** Cheap fast model for high-frequency trigger decisions. */
+export const FAST_MODEL = "anthropic/claude-haiku-4.5";
+
+/** Default output caps — OpenRouter reserves credits against max_tokens; the
+ *  model default (64k) exceeds most key limits and causes HTTP 402. */
+const DEFAULT_MAX_TOKENS: Record<string, number> = {
+  [MODEL]: 4096,
+  [FAST_MODEL]: 512,
+};
+
+export interface ChatOptions {
+  json?: boolean;
+  model?: string;
+  maxTokens?: number;
+}
+
 function headers(): Record<string, string> {
   const key = process.env.OPENROUTER_API_KEY ?? "";
   return {
@@ -33,7 +49,7 @@ export interface LLMResult {
  */
 export async function chat(
   messages: LLMMessage[],
-  json = false
+  options: ChatOptions = {}
 ): Promise<LLMResult | null> {
   const key = process.env.OPENROUTER_API_KEY ?? "";
   if (!key) {
@@ -41,12 +57,16 @@ export async function chat(
     return null;
   }
 
+  const model = options.model ?? MODEL;
+  const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS[model] ?? 4096;
+
   try {
     const body: Record<string, unknown> = {
-      model: MODEL,
+      model,
       messages,
+      max_tokens: maxTokens,
     };
-    if (json) {
+    if (options.json) {
       body.response_format = { type: "json_object" };
     }
 
@@ -59,7 +79,14 @@ export async function chat(
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      console.error(`[openrouter] HTTP ${res.status}: ${text}`);
+      if (res.status === 402) {
+        console.error(
+          `[openrouter] HTTP 402 — insufficient credits for max_tokens=${maxTokens}. ` +
+            `Add credits at openrouter.ai or lower max_tokens. Response: ${text.slice(0, 200)}`
+        );
+      } else {
+        console.error(`[openrouter] HTTP ${res.status}: ${text}`);
+      }
       return null;
     }
 
@@ -67,7 +94,7 @@ export async function chat(
     const content: string = data?.choices?.[0]?.message?.content ?? "";
     return {
       content,
-      model: data?.model ?? MODEL,
+      model: data?.model ?? model,
       usage: data?.usage,
     };
   } catch (err) {
@@ -77,8 +104,15 @@ export async function chat(
 }
 
 /** Convenience: send a single user prompt and get back parsed JSON. */
-export async function promptJSON<T>(prompt: string): Promise<T | null> {
-  const result = await chat([{ role: "user", content: prompt }], true);
+export async function promptJSON<T>(
+  prompt: string,
+  model: string = MODEL,
+  maxTokens?: number
+): Promise<T | null> {
+  const result = await chat(
+    [{ role: "user", content: prompt }],
+    { json: true, model, maxTokens }
+  );
   if (!result) return null;
   try {
     return JSON.parse(extractJSON(result.content)) as T;
@@ -106,14 +140,15 @@ function extractJSON(content: string): string {
 /** Send a test prompt to confirm the API key and endpoint work. */
 export async function testConnection(): Promise<boolean> {
   console.log("[openrouter] Sending test prompt …");
-  const result = await chat([
-    {
-      role: "user",
-      content:
-        'Reply with exactly this JSON and nothing else: {"status":"ok","app":"ghostwork"}',
-    },
+  const result = await chat(
+    [
+      {
+        role: "user",
+        content:
+          'Reply with exactly this JSON and nothing else: {"status":"ok","app":"ghostwork"}',
+      },
     ],
-    true
+    { json: true, maxTokens: 128 }
   );
   if (!result) {
     console.warn("[openrouter] Test failed — no response");

@@ -4,6 +4,7 @@
  */
 
 const SCREENPIPE_BASE = "http://localhost:3030";
+const DEFAULT_EXCLUDED_APPS = ["Cursor", "Electron", "Ghostwork"];
 
 // Auth token — populated by the manager after launch
 let _authToken: string | null = null;
@@ -31,6 +32,21 @@ export interface ContentItem {
   timestamp: string;
   app_name?: string;
   window_name?: string;
+  text?: string;
+  focused?: boolean;
+}
+
+export function normalizeContentItem(item: any): any {
+  const c = item.content ?? {};
+  return {
+    ...item,
+    app_name: c.app_name ?? item.app_name ?? "",
+    window_name: c.window_name ?? item.window_name ?? "",
+    timestamp: c.timestamp ?? item.timestamp ?? "",
+    text: c.text ?? item.text ?? "",
+    focused: c.focused ?? item.focused ?? false,
+    content: item.content,
+  };
 }
 
 export interface SearchResponse {
@@ -90,6 +106,7 @@ export async function searchContent(
   params: SearchParams = {}
 ): Promise<SearchResponse> {
   const { excluded_apps = [], ...rest } = params;
+  const effectiveExcludedApps = [...DEFAULT_EXCLUDED_APPS, ...excluded_apps];
 
   const query = new URLSearchParams();
   if (rest.limit !== undefined) query.set("limit", String(rest.limit));
@@ -112,14 +129,18 @@ export async function searchContent(
 
   const body: SearchResponse = await res.json();
 
-  // Privacy: filter excluded apps at the query level before any data leaves
-  if (excluded_apps.length > 0) {
-    const lower = excluded_apps.map((a) => a.toLowerCase());
-    body.data = body.data.filter((item) => {
-      const name = (item.app_name ?? "").toLowerCase();
-      return !lower.some((ex) => name.includes(ex));
+  let items = body.data.map(normalizeContentItem);
+
+  // Privacy: filter excluded apps after normalization (case-insensitive substring)
+  if (effectiveExcludedApps.length > 0) {
+    const lowerExcluded = effectiveExcludedApps.map((a) => a.toLowerCase());
+    items = items.filter((i) => {
+      const name = (i.app_name ?? "").toLowerCase();
+      return !lowerExcluded.some((ex) => name.includes(ex));
     });
   }
+
+  body.data = items;
 
   return body;
 }

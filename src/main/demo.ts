@@ -78,6 +78,13 @@ export function seedDemoData(): void {
     ])
   );
 
+  // Exclude Cursor and Electron from observation by default so the extractor
+  // never learns from debugging sessions of Ghostwork itself.
+  if (!getSetting("excluded_apps_defaulted")) {
+    setSetting("excluded_apps", JSON.stringify(["Cursor", "Electron"]));
+    setSetting("excluded_apps_defaulted", "1");
+  }
+
   setSetting("demo_seeded", "1");
   console.log("[demo] Seed complete.");
 }

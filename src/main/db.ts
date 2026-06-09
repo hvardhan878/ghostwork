@@ -23,6 +23,20 @@ export function getDb(): Database.Database {
   return _db;
 }
 
+// Safe column adder — silently ignores "duplicate column" errors on re-migration.
+function safeAddColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string
+): void {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch {
+    // Column already exists — no-op.
+  }
+}
+
 function migrate(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS workflows (
@@ -79,6 +93,31 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_corrections_rule ON corrections(rule_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp DESC);
   `);
+
+  // Additive migrations — safe to run on every boot.
+  safeAddColumn(db, 'rules', 'trigger_hints', "TEXT NOT NULL DEFAULT '{}'");
+  safeAddColumn(db, 'rules', 'accept_count', "INTEGER NOT NULL DEFAULT 0");
+  safeAddColumn(db, 'rules', 'dismiss_count', "INTEGER NOT NULL DEFAULT 0");
+  safeAddColumn(db, 'rules', 'action_steps', "TEXT NOT NULL DEFAULT '[]'");
+
+  // One-time wipe for the v2 decision engine: old keyword-era rules carry
+  // made-up confidence and no executable steps — start clean and relearn.
+  const versionRow = db
+    .prepare("SELECT value FROM settings WHERE key = 'model_version'")
+    .get() as { value: string } | undefined;
+  if (versionRow?.value !== "2") {
+    db.exec(`
+      DELETE FROM corrections;
+      DELETE FROM activity_log;
+      DELETE FROM rules;
+      DELETE FROM workflows;
+    `);
+    db.prepare(`
+      INSERT INTO settings (key, value) VALUES ('model_version', '2')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run();
+    console.log("[db] Migrated to model v2 — wiped keyword-era behaviour model.");
+  }
 }
 
 // ─── Workflows ────────────────────────────────────────────────────────────────
@@ -188,15 +227,26 @@ export interface Rule {
   correction_count: number;
   last_triggered: string | null;
   created_at: string;
+  /** JSON-serialised { apps: string[], keywords: string[] } (legacy, unused by v2 engine) */
+  trigger_hints: string;
+  /** Times the user accepted this rule's suggestion/execution. */
+  accept_count: number;
+  /** Times the user dismissed/rejected it. */
+  dismiss_count: number;
+  /** JSON-serialised string[] of concrete executable steps. */
+  action_steps: string;
 }
 
 export function upsertRule(
   workflowId: number,
   condition: string,
   action: string,
-  confidence: number
+  confidence: number,
+  actionSteps: string[] = []
 ): Rule {
   const db = getDb();
+  const stepsJson = JSON.stringify(actionSteps);
+
   const existing = db.prepare(`
     SELECT * FROM rules WHERE workflow_id = ? AND condition = ? AND action = ?
   `).get(workflowId, condition, action) as Rule | undefined;
@@ -207,16 +257,18 @@ export function upsertRule(
       1.0,
       existing.confidence + (confidence - existing.confidence) * 0.3
     );
+    // Only overwrite steps if the new extraction actually produced some.
+    const steps = actionSteps.length > 0 ? stepsJson : existing.action_steps;
     db.prepare(`
-      UPDATE rules SET confidence = ?, observed_count = ? WHERE id = ?
-    `).run(newConf, newCount, existing.id);
+      UPDATE rules SET confidence = ?, observed_count = ?, action_steps = ? WHERE id = ?
+    `).run(newConf, newCount, steps, existing.id);
     return db.prepare("SELECT * FROM rules WHERE id = ?").get(existing.id) as Rule;
   }
 
   const info = db.prepare(`
-    INSERT INTO rules (workflow_id, condition, action, confidence)
-    VALUES (?, ?, ?, ?)
-  `).run(workflowId, condition, action, confidence);
+    INSERT INTO rules (workflow_id, condition, action, confidence, action_steps)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(workflowId, condition, action, confidence, stepsJson);
 
   return db.prepare("SELECT * FROM rules WHERE id = ?").get(info.lastInsertRowid) as Rule;
 }
@@ -256,10 +308,46 @@ export function recordCorrection(
 export function acceptRule(ruleId: number): void {
   getDb().prepare(`
     UPDATE rules SET
-      confidence = MIN(1.0, confidence + 0.05),
+      accept_count = accept_count + 1,
       last_triggered = datetime('now')
     WHERE id = ?
   `).run(ruleId);
+}
+
+export function dismissRule(ruleId: number): void {
+  getDb().prepare(`
+    UPDATE rules SET dismiss_count = dismiss_count + 1 WHERE id = ?
+  `).run(ruleId);
+}
+
+/**
+ * Autonomy is earned through user feedback, never asserted by the LLM:
+ *   - suggest:    the starting tier for every rule
+ *   - supervised: >= 3 accepts AND no rejection among the last 5 outcomes
+ *   - autonomous: >= 8 accepts AND no rejection among the last 10 outcomes
+ * (LLM extraction confidence is used only for ranking/pruning.)
+ */
+export function earnedTier(rule: Rule): ConfidenceTier {
+  if (rule.accept_count < 3) return "suggest";
+
+  const recent = getDb().prepare(`
+    SELECT status FROM activity_log
+    WHERE rule_id = ? AND status IN ('accepted', 'rejected', 'undone', 'silent')
+    ORDER BY timestamp DESC
+    LIMIT 10
+  `).all(rule.id) as { status: string }[];
+
+  const last5HasRejection = recent
+    .slice(0, 5)
+    .some((r) => r.status === "rejected" || r.status === "undone");
+  if (last5HasRejection) return "suggest";
+
+  const last10HasRejection = recent.some(
+    (r) => r.status === "rejected" || r.status === "undone"
+  );
+  if (rule.accept_count >= 8 && !last10HasRejection) return "autonomous";
+
+  return "supervised";
 }
 
 export function deleteRule(id: number): void {
@@ -268,6 +356,52 @@ export function deleteRule(id: number): void {
 
 export function updateRuleCondition(id: number, condition: string): void {
   getDb().prepare("UPDATE rules SET condition = ? WHERE id = ?").run(condition, id);
+}
+
+/** Set a rule's confidence to 0.0 and record a "never_suggest" correction. */
+export function setRuleConfidenceZero(ruleId: number): void {
+  const db = getDb();
+  const rule = db.prepare("SELECT * FROM rules WHERE id = ?").get(ruleId) as Rule | undefined;
+  if (!rule) return;
+  db.prepare("UPDATE rules SET confidence = 0.0 WHERE id = ?").run(ruleId);
+  db.prepare(`
+    INSERT INTO corrections (rule_id, expected_action, actual_action, user_note)
+    VALUES (?, '', ?, 'never_suggest')
+  `).run(ruleId, rule.action);
+}
+
+export interface EvidenceEntry {
+  date: string;   // "Mon 2 Jun"
+  summary: string;
+}
+
+function _fmtEvidenceDate(ts: string): string {
+  const d = new Date(ts);
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+}
+
+/**
+ * Return the last N accepted/autonomous activity entries for any rule
+ * belonging to the given workflow.
+ */
+export function getEvidenceForRule(workflowId: number, limit = 3): EvidenceEntry[] {
+  const rows = getDb().prepare(`
+    SELECT al.action_taken, al.timestamp
+    FROM activity_log al
+    JOIN rules r ON al.rule_id = r.id
+    WHERE r.workflow_id = ?
+      AND al.status IN ('accepted', 'silent')
+    ORDER BY al.timestamp DESC
+    LIMIT ?
+  `).all(workflowId, limit) as { action_taken: string; timestamp: string }[];
+
+  return rows.map((row) => ({
+    date: _fmtEvidenceDate(row.timestamp),
+    summary: row.action_taken.slice(0, 80),
+  }));
 }
 
 // ─── Activity log ─────────────────────────────────────────────────────────────
@@ -341,6 +475,46 @@ export function getAllSettings(): Record<string, string> {
     .prepare("SELECT key, value FROM settings")
     .all() as { key: string; value: string }[];
   return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+
+// ─── Diagnostics ─────────────────────────────────────────────────────────────
+
+export interface RuleDiagnostic {
+  id: number;
+  workflow_id: number;
+  workflow_name: string;
+  condition: string;
+  action: string;
+  confidence: number;
+  observed_count: number;
+  correction_count: number;
+  accept_count: number;
+  dismiss_count: number;
+  action_steps: string;
+  last_triggered: string | null;
+}
+
+export function getDiagnostics(): {
+  rules: RuleDiagnostic[];
+  settings: Record<string, string>;
+  activityCount: number;
+} {
+  const db = getDb();
+
+  const rules = db.prepare(`
+    SELECT r.id, r.workflow_id, w.name as workflow_name,
+           r.condition, r.action, r.confidence, r.observed_count,
+           r.correction_count, r.accept_count, r.dismiss_count,
+           r.action_steps, r.last_triggered
+    FROM rules r
+    LEFT JOIN workflows w ON w.id = r.workflow_id
+    ORDER BY r.confidence DESC
+  `).all() as RuleDiagnostic[];
+
+  const settings = getAllSettings();
+  const activityCount = (db.prepare("SELECT COUNT(*) as n FROM activity_log").get() as { n: number }).n;
+
+  return { rules, settings, activityCount };
 }
 
 // ─── Model export ─────────────────────────────────────────────────────────────

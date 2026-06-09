@@ -7,6 +7,8 @@ import {
   nativeTheme,
   ipcMain,
   dialog,
+  globalShortcut,
+  screen,
 } from "electron";
 import * as path from "path";
 import * as fs from "fs";
@@ -31,6 +33,7 @@ import {
   pinWorkflow,
   recordCorrection,
   acceptRule,
+  dismissRule,
   getRecentActivityLog,
   updateActivityStatus,
   logActivity,
@@ -39,12 +42,15 @@ import {
   getAllSettings,
   exportModel,
   wipeModel,
+  setRuleConfidenceZero,
+  getDiagnostics,
 } from "./db";
 import { runExtractionJob } from "./extractor";
 import { runNightlyConsolidation } from "./consolidation";
 import { seedDemoData } from "./demo";
 import { executeWithComputerUse } from "./computerUse";
 import { startActionEngine, stopActionEngine } from "./actionEngine";
+import { handleNudgeDoIt, handleNudgeDismiss, showTestNudge } from "./nudgeWindow";
 import {
   initScreenpipeManager,
   stopScreenpipeManager,
@@ -52,6 +58,37 @@ import {
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+let correctionWindow: BrowserWindow | null = null;
+let correctionRuleId: number | null = null;
+let correctionAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
+// ─── Startup DB diagnostics ───────────────────────────────────────────────────
+
+function logDbState(): void {
+  try {
+    const { rules, settings, activityCount } = getDiagnostics();
+    console.log(`\n[db] ── Startup state ──────────────────────────────────`);
+    console.log(`[db] Rules: ${rules.length}  |  Activity log entries: ${activityCount}`);
+    console.log(`[db] Settings: autonomy_override=${settings.autonomy_override ?? "full"} | excluded_apps=${settings.excluded_apps ?? "[]"} | focus_categories_set=${settings.focus_categories_set ?? "0"} | focus_categories=${settings.focus_categories ?? "[]"}`);
+    if (rules.length === 0) {
+      console.log(`[db] No rules — Ghostwork needs to run the extractor to learn workflows`);
+    } else {
+      console.log(`[db] Rules (sorted by confidence):`);
+      for (const r of rules) {
+        const steps = (() => {
+          try { return JSON.parse(r.action_steps ?? "[]") as string[]; } catch { return []; }
+        })();
+        console.log(`  #${r.id} [${r.workflow_name}] conf=${r.confidence.toFixed(2)} obs=${r.observed_count} accepts=${r.accept_count} dismissals=${r.dismiss_count}`);
+        console.log(`       condition: "${r.condition.slice(0, 100)}"`);
+        console.log(`       action:    "${r.action.slice(0, 100)}"`);
+        console.log(`       steps:     ${steps.length > 0 ? steps.length + " recorded" : "(none)"}`);
+      }
+    }
+    console.log(`[db] ────────────────────────────────────────────────────\n`);
+  } catch (err) {
+    console.error("[db] Could not dump state:", err);
+  }
+}
 
 // ─── Screenpipe + OpenRouter bootstrap ───────────────────────────────────────
 
@@ -164,6 +201,8 @@ function registerIpcHandlers(): void {
     "db:correction",
     (_e, ruleId: number, expected: string, actual: string, note: string) => {
       recordCorrection(ruleId, expected, actual, note);
+      // Dismissals/rejections also count against earned autonomy.
+      if (/dismiss|reject/i.test(note)) dismissRule(ruleId);
       return true;
     }
   );
@@ -198,9 +237,16 @@ function registerIpcHandlers(): void {
   ipcMain.handle(
     "execute:task",
     async (_e, task: string, context: string = "") => {
-      return executeWithComputerUse(task, context, (step, actionName, detail) => {
+      console.log(`[computer-use] Starting task: "${task.slice(0, 100)}"`);
+      const result = await executeWithComputerUse(task, context, (step, actionName, detail) => {
         mainWindow?.webContents.send("execute:step", { step, actionName, detail });
       });
+      if (result.success) {
+        console.log(`[computer-use] ✓ Done in ${result.steps} steps`);
+      } else {
+        console.error(`[computer-use] ✗ Failed after ${result.steps} steps — ${result.error}`);
+      }
+      return result;
     }
   );
 
@@ -241,6 +287,52 @@ function registerIpcHandlers(): void {
     } catch (err) {
       return { success: false, error: String(err) };
     }
+  });
+
+  // ── Diagnostics ──
+  ipcMain.handle("db:diagnostics", () => getDiagnostics());
+
+  // ── Never suggest / confidence zero ──
+  ipcMain.handle("db:set-rule-confidence-zero", (_e, id: number) => {
+    setRuleConfidenceZero(id);
+    return true;
+  });
+
+  // ── Correction window IPC ──
+  ipcMain.handle("correction:save", (_e, text: string) => {
+    if (correctionRuleId != null) {
+      const rule = getAllRules().find((r) => r.id === correctionRuleId);
+      if (rule) {
+        recordCorrection(correctionRuleId, rule.action, text, "undo_correction");
+        // Lower confidence by 0.2 (on top of the -0.15 already applied by recordCorrection).
+        const db = getDb();
+        db.prepare(
+          "UPDATE rules SET confidence = MAX(0.0, confidence - 0.05) WHERE id = ?"
+        ).run(correctionRuleId);
+      }
+    }
+    if (correctionWindow && !correctionWindow.isDestroyed()) {
+      correctionWindow.close();
+    }
+    return true;
+  });
+
+  ipcMain.handle("correction:skip", () => {
+    if (correctionWindow && !correctionWindow.isDestroyed()) {
+      correctionWindow.close();
+    }
+    return true;
+  });
+
+  // ── Nudge popup IPC (macOS suggestion banner) ──
+  ipcMain.handle("nudge:do-it", () => handleNudgeDoIt());
+  ipcMain.handle("nudge:dismiss", () => {
+    handleNudgeDismiss();
+    return true;
+  });
+  ipcMain.handle("nudge:test", () => {
+    showTestNudge();
+    return true;
   });
 
   // ── Export / Wipe ──
@@ -300,6 +392,55 @@ function buildTrayIconDataURL(): string {
   );
 }
 
+// ─── Correction window ────────────────────────────────────────────────────────
+
+function openCorrectionWindow(ruleId: number): void {
+  if (correctionWindow && !correctionWindow.isDestroyed()) {
+    correctionWindow.close();
+  }
+  correctionRuleId = ruleId;
+
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  correctionWindow = new BrowserWindow({
+    width: 300,
+    height: 160,
+    x: width - 316,
+    y: height - 176,
+    frame: false,
+    alwaysOnTop: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    skipTaskbar: true,
+    backgroundColor: "#0d0d0d",
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "correction-preload.js"),
+    },
+  });
+
+  correctionWindow.loadFile(
+    path.join(__dirname, "../renderer/correction.html")
+  );
+
+  correctionWindow.on("closed", () => {
+    correctionWindow = null;
+    correctionRuleId = null;
+    if (correctionAutoCloseTimer) {
+      clearTimeout(correctionAutoCloseTimer);
+      correctionAutoCloseTimer = null;
+    }
+  });
+
+  // Auto-close safety net at 16 s (the window's own JS closes at 15 s).
+  correctionAutoCloseTimer = setTimeout(() => {
+    if (correctionWindow && !correctionWindow.isDestroyed()) {
+      correctionWindow.close();
+    }
+  }, 16_000);
+}
+
 // ─── Main window ──────────────────────────────────────────────────────────────
 
 function createWindow(): void {
@@ -339,6 +480,9 @@ app.whenReady().then(async () => {
   // Seed demo data on first launch
   seedDemoData();
 
+  // Startup DB state dump — helps diagnose rule/settings issues.
+  logDbState();
+
   // If user stored API key in settings, load it into env so OpenRouter can use it
   const storedKey = getSetting("openrouter_api_key", "");
   if (storedKey && !process.env.OPENROUTER_API_KEY) {
@@ -355,6 +499,25 @@ app.whenReady().then(async () => {
 
   startActionEngine(() => mainWindow);
 
+  // Cmd+Z — intercept if there is a pending undo from an autonomous/supervised action.
+  globalShortcut.register("CommandOrControl+Z", async () => {
+    const raw = getSetting("pending_undo", "");
+    if (!raw) return;
+    try {
+      const { activityId, ruleId, action } = JSON.parse(raw) as {
+        activityId: number;
+        ruleId: number;
+        action: string;
+      };
+      updateActivityStatus(activityId, "undone");
+      recordCorrection(ruleId, action, "", "");
+      setSetting("pending_undo", "");
+      openCorrectionWindow(ruleId);
+    } catch (err) {
+      console.error("[shortcut] Cmd+Z parse error:", err);
+    }
+  });
+
   // Non-blocking startup probes (runs after screenpipe manager kicks off)
   initConnections().catch((err) =>
     console.error("[boot] Connection init error:", err)
@@ -364,6 +527,7 @@ app.whenReady().then(async () => {
 app.on("window-all-closed", () => { /* stay alive in tray */ });
 
 app.on("before-quit", () => {
+  globalShortcut.unregisterAll();
   stopActionEngine();
   stopScreenpipeManager();
   mainWindow?.removeAllListeners("close");

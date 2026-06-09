@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'" />
+  <title>Correction</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d0d;
+      --surface: #141414;
+      --border: #242424;
+      --border-light: #2e2e2e;
+      --text: #e0e0e0;
+      --text-muted: #5a5a5a;
+      --text-dim: #303030;
+      --green: #22c55e;
+      --red: #ef4444;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+
+    html, body {
+      width: 300px; height: 160px;
+      background: var(--bg); color: var(--text);
+      font-family: var(--font); font-size: 12px;
+      -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+      border-radius: 10px;
+      border: 1px solid var(--border-light);
+    }
+
+    .container {
+      display: flex; flex-direction: column;
+      padding: 14px; gap: 10px; height: 100%;
+    }
+
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+
+    .title { font-size: 11px; color: var(--text-muted); letter-spacing: 0.05em; }
+
+    .countdown {
+      font-size: 10px; color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+    }
+
+    textarea {
+      flex: 1;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px 10px;
+      color: var(--text); font-size: 12px; font-family: var(--font);
+      outline: none; resize: none; line-height: 1.5;
+      transition: border-color .15s;
+    }
+    textarea:focus { border-color: var(--border-light); }
+    textarea::placeholder { color: var(--text-dim); }
+
+    .btns { display: flex; gap: 6px; }
+
+    .btn-save {
+      flex: 1; padding: 7px; border-radius: 6px; border: 1px solid #1a4020;
+      background: #0a2010; color: var(--green); font-size: 11px;
+      cursor: pointer; font-family: var(--font); transition: background .15s;
+    }
+    .btn-save:hover { background: #0f3020; }
+
+    .btn-skip {
+      padding: 7px 12px; border-radius: 6px; border: 1px solid var(--border);
+      background: none; color: var(--text-muted); font-size: 11px;
+      cursor: pointer; font-family: var(--font); transition: all .15s;
+    }
+    .btn-skip:hover { color: var(--text); border-color: var(--border-light); }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <span class="title">GHOSTWORK — UNDO</span>
+    <span class="countdown" id="countdown">Closes in 15s</span>
+  </div>
+  <textarea id="correction-text" placeholder="What should I have done?" rows="2" autofocus></textarea>
+  <div class="btns">
+    <button class="btn-save" id="btn-save">Save correction</button>
+    <button class="btn-skip" id="btn-skip">Skip</button>
+  </div>
+</div>
+
+<script>
+const api = window.correctionApi;
+let remaining = 15;
+
+const countdown = document.getElementById('countdown');
+const btnSave = document.getElementById('btn-save');
+const btnSkip = document.getElementById('btn-skip');
+const textarea = document.getElementById('correction-text');
+
+// Countdown timer — auto-close after 15 seconds of no interaction.
+let timer = setInterval(() => {
+  remaining--;
+  countdown.textContent = `Closes in ${remaining}s`;
+  if (remaining <= 0) {
+    clearInterval(timer);
+    api.skip();
+  }
+}, 1000);
+
+// Reset countdown on any user interaction.
+function resetTimer() {
+  remaining = 15;
+  countdown.textContent = `Closes in 15s`;
+}
+textarea.addEventListener('keydown', resetTimer);
+textarea.addEventListener('input', resetTimer);
+
+btnSave.addEventListener('click', () => {
+  clearInterval(timer);
+  const text = textarea.value.trim();
+  api.save(text);
+});
+
+btnSkip.addEventListener('click', () => {
+  clearInterval(timer);
+  api.skip();
+});
+</script>
+</body>
+</html>

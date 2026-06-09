@@ -33,7 +33,8 @@ function sanitiseItems(items: ContentItem[]): string {
       const contentText = JSON.stringify(item.content);
       return stripPII(`${base}: ${contentText}`);
     })
-    .join("\n");
+    .join("\n")
+    .slice(0, 40_000); // keep prompt within reasonable input-token budget
 }
 
 // ─── Claude prompt ────────────────────────────────────────────────────────────
@@ -43,6 +44,8 @@ interface ExtractedRule {
   action: string;
   confidence: number;
   evidence: string[];
+  /** Concrete executable steps, e.g. ["open linkedin.com", "search for {job title}"] */
+  steps: string[];
 }
 
 interface ExtractedWorkflow {
@@ -57,8 +60,12 @@ interface ExtractionResult {
   workflows: ExtractedWorkflow[];
 }
 
-function buildExtractionPrompt(activityText: string): string {
-  return `You are analysing a knowledge worker's computer activity from the last hour.
+function buildExtractionPrompt(activityText: string, focusCategories: string[] = []): string {
+  const categoryInstruction = focusCategories.length > 0
+    ? `Only extract workflows related to these categories: ${focusCategories.join(", ")}. Ignore all other activity entirely.\n\n`
+    : "";
+
+  return `${categoryInstruction}You are analysing a knowledge worker's computer activity from the last hour.
 Your task: extract repeating workflows and inferred behavioural rules.
 
 ACTIVITY DATA:
@@ -77,7 +84,8 @@ Return a JSON object with this exact schema (no extra keys):
           "condition": "when X happens",
           "action": "do Y",
           "confidence": 0.0,
-          "evidence": ["raw observation 1", "raw observation 2"]
+          "evidence": ["raw observation 1", "raw observation 2"],
+          "steps": ["concrete step 1", "concrete step 2", "concrete step 3"]
         }
       ]
     }
@@ -90,7 +98,39 @@ Rules:
 - Rules must be specific and actionable, not vague
 - If no patterns found, return {"workflows":[]}
 - Strip any personal data from evidence strings
-- Focus on app-switching patterns, repeated sequences, conditional behaviours`;
+- Focus on app-switching patterns, repeated sequences, conditional behaviours
+- "condition" must describe an observable screen state (app, website, page content) so it can be checked against what's on screen right now
+- "steps" must be a concrete, executable procedure a computer-use agent can follow, e.g. ["open linkedin.com in the browser", "click the search bar", "type the job title from the persona", "press Enter"]. Use placeholders in {braces} for variable values.`;
+}
+
+// ─── Focus category helpers ───────────────────────────────────────────────────
+
+export function parseFocusCategories(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as string[]).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function focusCategoryKeywords(categories: string[]): string[] {
+  // Flatten category labels into individual matchable words/phrases.
+  return categories.flatMap((cat) =>
+    cat.toLowerCase().split(/[\s&,]+/).filter((w) => w.length > 2)
+  );
+}
+
+function filterByFocusCategories(items: ContentItem[], categories: string[]): ContentItem[] {
+  const keywords = focusCategoryKeywords(categories);
+  if (keywords.length === 0) return items;
+  return items.filter((item) => {
+    const haystack = [item.app_name, item.window_name, item.text?.slice(0, 300)]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return keywords.some((kw) => haystack.includes(kw));
+  });
 }
 
 // ─── Extraction job ───────────────────────────────────────────────────────────
@@ -108,7 +148,7 @@ export async function runExtractionJob(): Promise<void> {
 
   let items: ContentItem[];
   try {
-    items = await getRecentActivity(1, excludedApps, 200);
+    items = await getRecentActivity(1, excludedApps, 80);
   } catch (err) {
     console.warn("[extractor] Could not fetch screenpipe data:", err);
     return;
@@ -119,11 +159,21 @@ export async function runExtractionJob(): Promise<void> {
     return;
   }
 
+  // Filter by focus categories if configured.
+  const focusCategories = parseFocusCategories(getSetting("focus_categories", "[]"));
+  if (focusCategories.length > 0) {
+    items = filterByFocusCategories(items, focusCategories);
+    if (items.length === 0) {
+      console.log("[extractor] No items match focus categories — skipping.");
+      return;
+    }
+  }
+
   console.log(`[extractor] Processing ${items.length} events …`);
   const activityText = sanitiseItems(items);
 
   const result = await promptJSON<ExtractionResult>(
-    buildExtractionPrompt(activityText)
+    buildExtractionPrompt(activityText, focusCategories)
   );
 
   if (!result || !Array.isArray(result.workflows)) {
@@ -145,7 +195,8 @@ export async function runExtractionJob(): Promise<void> {
 
     for (const rule of wf.rules ?? []) {
       if (!rule.condition || !rule.action) continue;
-      upsertRule(workflow.id, rule.condition, rule.action, rule.confidence);
+      const steps = Array.isArray(rule.steps) ? rule.steps.filter(Boolean) : [];
+      upsertRule(workflow.id, rule.condition, rule.action, rule.confidence, steps);
     }
 
     console.log(

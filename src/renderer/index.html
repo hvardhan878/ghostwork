@@ -152,26 +152,88 @@
     }
     .feed-step-text { font-size:11px; color:#484848; font-family:var(--mono); line-height:1.5; }
 
-    /* ── Suggestion card ── */
+    /* ── Slim suggestion card ── */
     .suggest-card {
       background:var(--bg); border:1px solid var(--border-light); border-radius:8px;
-      padding:12px; display:flex; flex-direction:column; gap:8px;
+      overflow:hidden; cursor:default;
     }
-    .suggest-card .action { font-size:12px; color:var(--text); line-height:1.4; }
-    .suggest-card .cond { font-size:11px; color:var(--text-muted); }
-    .suggest-card .btns { display:flex; gap:6px; }
+    .suggest-card-collapsed {
+      display:flex; align-items:center; gap:6px; padding:0 8px; height:48px;
+    }
+    .suggest-card-action {
+      flex:1; font-size:11px; color:var(--text);
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .suggest-card-btns { display:flex; gap:4px; flex-shrink:0; }
     .suggest-card .btn-acc {
-      flex:1; padding:5px; border-radius:6px; border:1px solid #1a4020;
-      background:#0a2010; color:var(--green); font-size:11px; cursor:pointer;
-      font-family:var(--font); transition:background .15s;
+      padding:4px 9px; border-radius:6px; border:1px solid #1a4020;
+      background:#0a2010; color:var(--green); font-size:10px; cursor:pointer;
+      font-family:var(--font); transition:background .15s; white-space:nowrap;
     }
     .suggest-card .btn-acc:hover { background:#0f3020; }
     .suggest-card .btn-rej {
-      flex:1; padding:5px; border-radius:6px; border:1px solid var(--border);
-      background:none; color:var(--text-muted); font-size:11px; cursor:pointer;
+      padding:4px 9px; border-radius:6px; border:1px solid var(--border);
+      background:none; color:var(--text-muted); font-size:10px; cursor:pointer;
       font-family:var(--font); transition:all .15s;
     }
     .suggest-card .btn-rej:hover { color:var(--red); border-color:#3a1010; }
+    .suggest-card-expanded {
+      max-height:0; overflow:hidden;
+      transition:max-height 0.22s ease, border-top 0s;
+    }
+    .suggest-card.expanded .suggest-card-expanded {
+      max-height:200px; border-top:1px solid var(--border);
+    }
+    .suggest-card-inner { padding:8px 10px; display:flex; flex-direction:column; gap:6px; }
+    .suggest-ev-count { font-size:11px; color:var(--text-muted); }
+    .suggest-ev-rows { display:flex; flex-direction:column; gap:3px; }
+    .suggest-ev-row { display:flex; gap:8px; font-size:11px; }
+    .suggest-ev-date { color:var(--text-dim); flex-shrink:0; width:76px; font-family:var(--mono); }
+    .suggest-ev-summary { color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .btn-never {
+      padding:4px 8px; border-radius:5px; border:1px solid var(--border);
+      background:none; color:var(--text-dim); font-size:10px; cursor:pointer;
+      font-family:var(--font); transition:all .15s; align-self:flex-start;
+    }
+    .btn-never:hover { color:var(--red); border-color:#3a1010; }
+
+    /* ── Focus overlay ── */
+    #focus-overlay {
+      position:fixed; inset:0; z-index:1000;
+      background:rgba(0,0,0,0.88);
+      display:flex; align-items:center; justify-content:center;
+      transition:opacity 0.3s ease;
+    }
+    #focus-overlay.hidden { opacity:0; pointer-events:none; }
+    .focus-card {
+      width:320px; background:var(--surface);
+      border:1px solid var(--border-light); border-radius:12px;
+      padding:24px; display:flex; flex-direction:column; gap:16px;
+    }
+    .focus-title { font-size:15px; color:var(--text); font-weight:500; }
+    .focus-sub { font-size:12px; color:var(--text-muted); line-height:1.55; }
+    .focus-pills { display:flex; flex-wrap:wrap; gap:8px; }
+    .focus-pill {
+      padding:5px 12px; border-radius:20px; border:1px solid var(--border);
+      background:none; color:var(--text-muted); font-size:11px; cursor:pointer;
+      font-family:var(--font); transition:all .15s; user-select:none;
+    }
+    .focus-pill.selected { border-color:var(--green); color:var(--green); background:#0a2010; }
+    .focus-pill:hover:not(.selected) { border-color:var(--border-light); color:var(--text); }
+    .focus-custom {
+      background:var(--bg); border:1px solid var(--border); border-radius:6px;
+      padding:8px 10px; color:var(--text); font-size:12px; font-family:var(--font);
+      outline:none; resize:none; width:100%;
+    }
+    .focus-custom:focus { border-color:var(--border-light); }
+    .focus-custom::placeholder { color:var(--text-dim); }
+    .btn-focus-start {
+      padding:10px; border-radius:8px; border:none;
+      background:var(--green); color:#000; font-size:13px; font-weight:500;
+      cursor:pointer; font-family:var(--font); transition:opacity .15s; width:100%;
+    }
+    .btn-focus-start:disabled { opacity:0.35; cursor:not-allowed; }
+    .btn-focus-start:not(:disabled):hover { opacity:0.85; }
 
     /* ── Execution progress ── */
     .exec-progress {
@@ -301,6 +363,25 @@
   </style>
 </head>
 <body>
+
+<!-- ── Focus categories overlay (first launch) ──────────────────────────── -->
+<div id="focus-overlay" class="hidden">
+  <div class="focus-card">
+    <div class="focus-title">What should Ghostwork watch?</div>
+    <div class="focus-sub">Select the types of work you want Ghostwork to learn and automate. You can change this later in Settings.</div>
+    <div class="focus-pills" id="focus-pills">
+      <button class="focus-pill" data-cat="Email &amp; inbox">Email &amp; inbox</button>
+      <button class="focus-pill" data-cat="CRM updates">CRM updates</button>
+      <button class="focus-pill" data-cat="Reporting">Reporting</button>
+      <button class="focus-pill" data-cat="Candidate tracking">Candidate tracking</button>
+      <button class="focus-pill" data-cat="Onboarding">Onboarding</button>
+      <button class="focus-pill" data-cat="Scheduling">Scheduling</button>
+    </div>
+    <input class="focus-custom" id="focus-custom-input" placeholder="Or describe something specific…" />
+    <button class="btn-focus-start" id="btn-focus-start" disabled>Start watching →</button>
+  </div>
+</div>
+
 <div class="app">
 
   <!-- ── Titlebar ─────────────────────────────────────────────────────── -->
@@ -377,7 +458,47 @@
   <!-- ── Behaviour model view ──────────────────────────────────────────── -->
   <div class="view" id="view-model">
     <div class="scroll">
-      <div class="section-title">Learned workflows</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div class="section-title" style="margin-bottom:0;">Learned workflows</div>
+        <div style="display:flex;gap:6px;">
+          <button
+            class="btn-ghost"
+            onclick="api.nudge.test()"
+          >Test nudge</button>
+          <button
+            class="btn-ghost"
+            onclick="loadDiagnostics(this)"
+          >Diagnostics</button>
+          <button
+            id="extract-now-btn"
+            class="btn-ghost"
+            onclick="
+              const btn = this;
+              btn.disabled = true;
+              btn.innerHTML = '<span class=\'exec-spinner\' style=\'display:inline-block;vertical-align:middle;margin-right:5px;\'></span>Extracting…';
+              window.ghostwork.extractor.run().then(function() {
+                loadModel();
+                btn.disabled = false;
+                btn.textContent = 'Extract now';
+              }).catch(function() {
+                btn.disabled = false;
+                btn.textContent = 'Extract now';
+              });
+            "
+          >
+            Extract now
+          </button>
+        </div>
+      </div>
+      <!-- Diagnostics panel -->
+      <div id="diag-panel" style="display:none;margin-bottom:20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+        <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;">
+          <span style="font-size:11px;color:var(--text-muted);letter-spacing:0.08em;text-transform:uppercase;">Engine diagnostics</span>
+          <button onclick="document.getElementById('diag-panel').style.display='none'" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;padding:0 2px;">×</button>
+        </div>
+        <div id="diag-content" style="padding:12px 14px;font-size:11px;font-family:var(--mono);color:var(--text-muted);white-space:pre-wrap;max-height:360px;overflow-y:auto;line-height:1.6;"></div>
+      </div>
+
       <div id="model-list" class="model-list">
         <div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>
       </div>
@@ -747,15 +868,45 @@ function renderSuggestions() {
     el.innerHTML = '<div class="sidebar-empty">No pending suggestions</div>';
     return;
   }
-  el.innerHTML = suggestions.map((s, i) => `
+  el.innerHTML = suggestions.map((s, i) => {
+    const evidence = Array.isArray(s.evidence) ? s.evidence : [];
+    const evCount = evidence.length;
+    const evRows = evidence.map(e =>
+      `<div class="suggest-ev-row">
+        <span class="suggest-ev-date">${esc(e.date)}</span>
+        <span class="suggest-ev-summary">${esc(e.summary)}</span>
+      </div>`
+    ).join('');
+
+    return `
     <div class="suggest-card" id="suggest-${i}">
-      <div class="cond">${esc(s.condition)}</div>
-      <div class="action">${esc(s.action)}</div>
-      <div class="btns" id="suggest-btns-${i}">
-        <button class="btn-acc" onclick="acceptSuggestion(${i})">Do it</button>
-        <button class="btn-rej" onclick="dismissSuggestion(${i})">Dismiss</button>
+      <div class="suggest-card-collapsed">
+        <span class="suggest-card-action" title="${esc(s.action)}">${esc(s.action)}</span>
+        <div class="suggest-card-btns" id="suggest-btns-${i}">
+          <button class="btn-acc" onclick="acceptSuggestion(${i})">Do it</button>
+          <button class="btn-rej" onclick="dismissSuggestion(${i})">Dismiss</button>
+        </div>
       </div>
-    </div>`).join('');
+      <div class="suggest-card-expanded">
+        <div class="suggest-card-inner">
+          ${evCount > 0
+            ? `<div class="suggest-ev-count">Seen you do this ${evCount} time${evCount !== 1 ? 's' : ''}</div>
+               <div class="suggest-ev-rows">${evRows}</div>`
+            : `<div class="suggest-ev-count" style="color:var(--text-dim)">No history yet</div>`
+          }
+          <button class="btn-never" onclick="neverSuggest(${i})">Never suggest this</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  // Attach hover expand/collapse listeners.
+  suggestions.forEach((_s, i) => {
+    const card = document.getElementById('suggest-' + i);
+    if (!card) return;
+    card.addEventListener('mouseenter', () => card.classList.add('expanded'));
+    card.addEventListener('mouseleave', () => card.classList.remove('expanded'));
+  });
 }
 
 async function acceptSuggestion(i) {
@@ -774,7 +925,7 @@ async function acceptSuggestion(i) {
 
   // Fire real execution
   try {
-    const result = await api.execute.task(s.action, `Triggered from suggestion: ${s.condition}`);
+    const result = await api.execute.task(s.instruction || s.action, `Triggered from suggestion: ${s.condition}`);
     await api.db.activityStatus(s.id, result.success ? 'accepted' : 'rejected');
     if (s.ruleId) {
       if (result.success) await api.db.acceptRule(s.ruleId);
@@ -799,6 +950,15 @@ async function dismissSuggestion(i) {
   if (!s) return;
   await api.db.activityStatus(s.id, 'rejected');
   if (s.ruleId) await api.db.correction(s.ruleId, s.action, '', 'dismissed');
+  suggestions.splice(i, 1);
+  renderSuggestions();
+}
+
+async function neverSuggest(i) {
+  const s = suggestions[i];
+  if (!s) return;
+  if (s.ruleId) await api.db.setRuleConfidenceZero(s.ruleId);
+  await api.db.activityStatus(s.id, 'rejected');
   suggestions.splice(i, 1);
   renderSuggestions();
 }
@@ -1104,11 +1264,98 @@ api.on('screenpipe-mgr:status', (data) => {
   }
 });
 
+// ── Diagnostics ──────────────────────────────────────────────────────────────
+async function loadDiagnostics(btn) {
+  const panel = document.getElementById('diag-panel');
+  const content = document.getElementById('diag-content');
+  panel.style.display = 'block';
+  content.textContent = 'Loading…';
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+
+  try {
+    const d = await api.db.diagnostics();
+    const lines = [];
+
+    lines.push(`Activity log entries: ${d.activityCount}`);
+    lines.push(`autonomy_override: ${d.settings.autonomy_override ?? 'full'}`);
+    lines.push(`focus_categories_set: ${d.settings.focus_categories_set ?? '0'}`);
+    lines.push(`focus_categories: ${d.settings.focus_categories ?? '[]'}`);
+    lines.push(`excluded_apps: ${d.settings.excluded_apps ?? '[]'}`);
+    lines.push('');
+    lines.push(`Rules (${d.rules.length} total):`);
+
+    if (d.rules.length === 0) {
+      lines.push('  — No rules. Run "Extract now" after using apps Ghostwork should learn from.');
+    } else {
+      for (const r of d.rules) {
+        let steps = [];
+        try { steps = JSON.parse(r.action_steps || '[]'); } catch {}
+
+        const tier = r.accept_count >= 8 && r.dismiss_count === 0
+          ? 'autonomous (earned)'
+          : r.accept_count >= 3 ? 'supervised (earned)' : 'suggest';
+
+        lines.push(`#${r.id} [${r.workflow_name ?? 'unknown'}]  conf=${r.confidence.toFixed(2)}  obs=${r.observed_count}  accepts=${r.accept_count}  dismissals=${r.dismiss_count}  tier=${tier}`);
+        lines.push(`  condition: "${r.condition.slice(0, 120)}"`);
+        lines.push(`  action:    "${r.action.slice(0, 120)}"`);
+        lines.push(`  steps:     ${steps.length > 0 ? steps.length + ' recorded' : '—'}`);
+        lines.push('');
+      }
+    }
+
+    content.textContent = lines.join('\n');
+  } catch(e) {
+    content.textContent = 'Error: ' + e;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Diagnostics'; }
+  }
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadFeed();
 checkConnections();
 setInterval(loadFeed, 15000);          // refresh feed every 15s
 setInterval(checkConnections, 30000);  // re-check connections every 30s
+
+// ── Focus overlay — first launch ─────────────────────────────────────────────
+(async function initFocusOverlay() {
+  const done = await api.settings.get('focus_categories_set', '');
+  if (done === '1') return; // already set up
+
+  const overlay = document.getElementById('focus-overlay');
+  const startBtn = document.getElementById('btn-focus-start');
+  const customInput = document.getElementById('focus-custom-input');
+  overlay.classList.remove('hidden');
+
+  function updateStartBtn() {
+    const anySelected = document.querySelector('.focus-pill.selected');
+    const hasCustom = customInput.value.trim().length > 0;
+    startBtn.disabled = !anySelected && !hasCustom;
+  }
+
+  document.querySelectorAll('.focus-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      pill.classList.toggle('selected');
+      updateStartBtn();
+    });
+  });
+
+  customInput.addEventListener('input', updateStartBtn);
+
+  startBtn.addEventListener('click', async () => {
+    const selected = Array.from(document.querySelectorAll('.focus-pill.selected'))
+      .map(p => p.dataset.cat);
+    const custom = customInput.value.trim();
+    if (custom) selected.push(custom);
+
+    await api.settings.set('focus_categories', JSON.stringify(selected));
+    await api.settings.set('focus_categories_set', '1');
+
+    overlay.style.transition = 'opacity 0.3s ease';
+    overlay.style.opacity = '0';
+    setTimeout(() => overlay.classList.add('hidden'), 310);
+  });
+})();
 </script>
 </body>
 </html>

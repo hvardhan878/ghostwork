@@ -4,7 +4,7 @@
   "description": "A background agent that learns and automates your workflows",
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc --project tsconfig.json && cp src/renderer/index.html dist/renderer/index.html",
+    "build": "tsc --project tsconfig.json && cp src/renderer/*.html dist/renderer/",
     "rebuild-native": "electron-rebuild -f -w better-sqlite3",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron . --inspect",

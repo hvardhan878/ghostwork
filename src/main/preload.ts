@@ -40,11 +40,14 @@ contextBridge.exposeInMainWorld("ghostwork", {
     acceptRule: (id: number) => ipcRenderer.invoke("db:accept-rule", id),
     correction: (ruleId: number, expected: string, actual: string, note: string) =>
       ipcRenderer.invoke("db:correction", ruleId, expected, actual, note),
+    setRuleConfidenceZero: (id: number) =>
+      ipcRenderer.invoke("db:set-rule-confidence-zero", id),
 
     activityLog: (limit?: number) => ipcRenderer.invoke("db:activity-log", limit),
     activityStatus: (id: number, status: string) =>
       ipcRenderer.invoke("db:activity-status", id, status),
 
+    diagnostics: () => ipcRenderer.invoke("db:diagnostics"),
     export: () => ipcRenderer.invoke("db:export"),
     wipe: () => ipcRenderer.invoke("db:wipe"),
   },
@@ -55,6 +58,10 @@ contextBridge.exposeInMainWorld("ghostwork", {
       ipcRenderer.invoke("settings:get", key, fallback),
     set: (key: string, value: string) =>
       ipcRenderer.invoke("settings:set", key, value),
+  },
+
+  nudge: {
+    test: () => ipcRenderer.invoke("nudge:test"),
   },
 
   on: (channel: string, fn: (...args: unknown[]) => void) => {

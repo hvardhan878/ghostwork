@@ -25,6 +25,11 @@ const MESSAGES_URL = "https://openrouter.ai/api/v1/messages";
 const MODEL = "anthropic/claude-sonnet-4-5";
 const MAX_STEPS = 30;
 
+// Sonnet 4.5 uses the Jan 2025 computer-use tool, not the Nov 2025 version.
+// See: https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool
+const COMPUTER_USE_BETA = "computer-use-2025-01-24";
+const COMPUTER_TOOL_TYPE = "computer_20250124";
+
 const SS_PATH = path.join(os.tmpdir(), "gw_ss.png");
 const PY_PATH = path.join(os.tmpdir(), "gw_action.py");
 const AS_PATH = path.join(os.tmpdir(), "gw_action.applescript");
@@ -424,7 +429,7 @@ export async function executeWithComputerUse(
         headers: {
           Authorization: `Bearer ${key}`,
           "anthropic-version": "2023-06-01",
-          "anthropic-beta": "computer-use-2025-11-24",
+          "anthropic-beta": COMPUTER_USE_BETA,
           "HTTP-Referer": "https://ghostwork.app",
           "X-Title": "Ghostwork",
           "Content-Type": "application/json",
@@ -435,7 +440,7 @@ export async function executeWithComputerUse(
           system: systemPrompt,
           tools: [
             {
-              type: "computer_20251124",
+              type: COMPUTER_TOOL_TYPE,
               name: "computer",
               display_width_px: physW,
               display_height_px: physH,
