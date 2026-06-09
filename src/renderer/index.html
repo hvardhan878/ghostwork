@@ -463,6 +463,12 @@
         <div style="display:flex;gap:6px;">
           <button
             class="btn-ghost"
+            id="teach-btn"
+            onclick="toggleTeach()"
+            style="border-color:#3a3a5a;"
+          >&#9210; Teach skill</button>
+          <button
+            class="btn-ghost"
             onclick="api.nudge.test()"
           >Test nudge</button>
           <button
@@ -499,6 +505,25 @@
         <div id="diag-content" style="padding:12px 14px;font-size:11px;font-family:var(--mono);color:var(--text-muted);white-space:pre-wrap;max-height:360px;overflow-y:auto;line-height:1.6;"></div>
       </div>
 
+      <!-- Pending approvals (shadow mode) -->
+      <div id="approvals-section" style="display:none;margin-bottom:20px;">
+        <div class="section-title" style="font-size:12px;">Staged for review</div>
+        <div id="approvals-list"></div>
+      </div>
+
+      <!-- Weekly receipt -->
+      <div id="receipt-card" style="display:none;margin-bottom:20px;padding:12px 14px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">
+        <div style="font-size:11px;color:var(--text-muted);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:6px;">This week</div>
+        <div id="receipt-line" style="font-size:13px;color:var(--text);"></div>
+        <div id="receipt-detail" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+      </div>
+
+      <!-- Skills -->
+      <div id="skills-section" style="display:none;margin-bottom:20px;">
+        <div class="section-title" style="font-size:12px;">Skills (compiled &amp; taught)</div>
+        <div id="skills-list"></div>
+      </div>
+
       <div id="model-list" class="model-list">
         <div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>
       </div>
@@ -529,10 +554,19 @@
           <div class="setting-row">
             <div class="setting-label">
               <div class="setting-label-title">OpenRouter API Key</div>
-              <div class="setting-label-desc">Used for pattern extraction via Claude Sonnet</div>
+              <div class="setting-label-desc">Learning &amp; trigger decisions (required)</div>
             </div>
             <div class="setting-control">
               <input type="password" class="input-field" id="or-key-input" placeholder="sk-or-…" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Anthropic API Key</div>
+              <div class="setting-label-desc">Optional — best quality for &ldquo;Do it&rdquo; execution. Without this, OpenRouter vision fallback is used.</div>
+            </div>
+            <div class="setting-control">
+              <input type="password" class="input-field" id="anthropic-key-input" placeholder="sk-ant-…" />
             </div>
           </div>
           <div class="setting-row">
@@ -569,6 +603,18 @@
                 <option value="suggest">Suggest only</option>
                 <option value="supervised">Supervised (act + notify)</option>
                 <option value="full">Full autonomous</option>
+              </select>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Shadow mode</div>
+              <div class="setting-label-desc">Outbound actions (send / post / submit) are staged for one-tap review, never auto-fired</div>
+            </div>
+            <div class="setting-control">
+              <select class="select-field" id="shadow-select">
+                <option value="1">On (recommended)</option>
+                <option value="0">Off</option>
               </select>
             </div>
           </div>
@@ -642,7 +688,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('view-' + view).classList.add('active');
-    if (view === 'model') loadModel();
+    if (view === 'model') { loadModel(); loadSkills(); loadApprovals(); loadReceipt(); }
     if (view === 'settings') loadSettings();
   });
 });
@@ -1170,6 +1216,8 @@ async function loadSettings() {
   // API key
   const keyInput = document.getElementById('or-key-input');
   keyInput.value = settings['openrouter_api_key'] || '';
+  const anthropicInput = document.getElementById('anthropic-key-input');
+  if (anthropicInput) anthropicInput.value = settings['anthropic_api_key'] || '';
 
   // Excluded apps
   const exclRaw = settings['excluded_apps'] || '[]';
@@ -1180,6 +1228,9 @@ async function loadSettings() {
   // Autonomy
   const autonomy = settings['autonomy_override'] || 'full';
   document.getElementById('autonomy-select').value = autonomy;
+
+  // Shadow mode (default on)
+  document.getElementById('shadow-select').value = settings['shadow_mode'] === '0' ? '0' : '1';
 
   // Screenpipe connection
   const h = await api.screenpipe.health().catch(() => ({ status: 'error', message: '' }));
@@ -1193,7 +1244,11 @@ async function loadSettings() {
 document.getElementById('or-key-input').addEventListener('blur', async () => {
   const val = document.getElementById('or-key-input').value.trim();
   await api.settings.set('openrouter_api_key', val);
-  process.env && (process.env.OPENROUTER_API_KEY = val);
+});
+
+document.getElementById('anthropic-key-input').addEventListener('blur', async () => {
+  const val = document.getElementById('anthropic-key-input').value.trim();
+  await api.settings.set('anthropic_api_key', val);
 });
 
 // Save excluded apps on blur
@@ -1207,6 +1262,12 @@ document.getElementById('excluded-apps-input').addEventListener('blur', async ()
 document.getElementById('autonomy-select').addEventListener('change', async () => {
   const val = document.getElementById('autonomy-select').value;
   await api.settings.set('autonomy_override', val);
+});
+
+// Save shadow mode on change
+document.getElementById('shadow-select').addEventListener('change', async () => {
+  const val = document.getElementById('shadow-select').value;
+  await api.settings.set('shadow_mode', val);
 });
 
 // Test OpenRouter
@@ -1311,9 +1372,176 @@ async function loadDiagnostics(btn) {
   }
 }
 
+// ── Teach Mode ───────────────────────────────────────────────────────────────
+let teachRecording = false;
+
+function renderTeachBtn() {
+  const btn = document.getElementById('teach-btn');
+  if (!btn) return;
+  if (teachRecording) {
+    btn.innerHTML = '&#9209; Stop recording';
+    btn.style.color = '#ff6b6b';
+    btn.style.borderColor = '#5a2a2a';
+  } else {
+    btn.innerHTML = '&#9210; Teach skill';
+    btn.style.color = '';
+    btn.style.borderColor = '#3a3a5a';
+  }
+}
+
+async function toggleTeach() {
+  const btn = document.getElementById('teach-btn');
+  btn.disabled = true;
+  try {
+    if (!teachRecording) {
+      const res = await api.teach.start();
+      if (res.ok) {
+        teachRecording = true;
+        alert('Recording. Perform the task in Chrome, then hit "Stop recording".');
+      } else {
+        alert('Could not start recording: ' + (res.error || 'unknown error'));
+      }
+    } else {
+      const res = await api.teach.stop();
+      teachRecording = false;
+      if (res.ok) {
+        alert(`Skill saved: "${res.skill.name}" (${res.steps} steps)`);
+        loadSkills();
+      } else {
+        alert('Recording produced no skill: ' + (res.error || 'unknown error'));
+      }
+    }
+  } finally {
+    btn.disabled = false;
+    renderTeachBtn();
+  }
+}
+
+api.on('teach:status', (data) => {
+  teachRecording = !!data.recording;
+  renderTeachBtn();
+  if (data.result && data.result.ok) loadSkills();
+});
+
+// ── Skills ───────────────────────────────────────────────────────────────────
+async function loadSkills() {
+  const section = document.getElementById('skills-section');
+  const list = document.getElementById('skills-list');
+  if (!section || !list) return;
+  try {
+    const skills = await api.skills.list();
+    if (!skills || skills.length === 0) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+    list.innerHTML = skills.map(s => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:6px;background:var(--surface);border:1px solid var(--border);border-radius:8px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.name)}</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">
+            ${s.steps.length} steps · ${esc(s.source)} · ${s.run_count} runs (${s.success_count} ok)
+            ${s.trigger_type === 'schedule' ? ' · ⏰ ' + esc(s.trigger_value) : ''}
+          </div>
+        </div>
+        <button class="btn-sm" onclick="runSkill(${s.id}, this)">Run</button>
+        <button class="btn-sm" onclick="scheduleSkill(${s.id}, ${esc(JSON.stringify(s.trigger_value || ''))})">Schedule</button>
+        <button class="btn-sm reject" onclick="deleteSkill(${s.id})">Delete</button>
+      </div>`).join('');
+  } catch(e) { console.error('skills load error', e); }
+}
+
+async function runSkill(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+  try {
+    const res = await api.skills.run(id);
+    if (res.staged) alert('Run paused — an outbound action is staged for your review.');
+    else if (!res.success) alert('Skill run failed: ' + (res.error || 'unknown'));
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Run'; }
+    loadSkills();
+    loadApprovals();
+  }
+}
+
+async function scheduleSkill(id, current) {
+  const cron = prompt('Cron expression (e.g. "0 8 * * 1-5" = weekdays 8am). Empty = unschedule.', current || '0 8 * * 1-5');
+  if (cron === null) return;
+  if (cron.trim()) await api.skills.setTrigger(id, 'schedule', cron.trim());
+  else await api.skills.setTrigger(id, 'manual', '');
+  loadSkills();
+}
+
+async function deleteSkill(id) {
+  if (!confirm('Delete this skill?')) return;
+  await api.skills.remove(id);
+  loadSkills();
+}
+
+api.on('skills:updated', loadSkills);
+
+// ── Approvals (shadow mode) ──────────────────────────────────────────────────
+async function loadApprovals() {
+  const section = document.getElementById('approvals-section');
+  const list = document.getElementById('approvals-list');
+  if (!section || !list) return;
+  try {
+    const approvals = await api.approvals.list();
+    if (!approvals || approvals.length === 0) { section.style.display = 'none'; return; }
+    section.style.display = 'block';
+    list.innerHTML = approvals.map(a => `
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:6px;background:#1a140e;border:1px solid #3a2e1a;border-radius:8px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12px;color:var(--text);">${esc(a.description)}</div>
+          <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">Staged ${esc(a.created_at)} — will not fire without your approval</div>
+        </div>
+        <button class="btn-sm" onclick="approveStaged(${a.id}, this)" style="color:#22c55e;">Approve &amp; send</button>
+        <button class="btn-sm reject" onclick="rejectStaged(${a.id})">Reject</button>
+      </div>`).join('');
+  } catch(e) { console.error('approvals load error', e); }
+}
+
+async function approveStaged(id, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const res = await api.approvals.approve(id);
+    if (!res.ok) alert('Approved but execution failed: ' + (res.error || 'unknown'));
+  } finally {
+    loadApprovals();
+    loadSkills();
+  }
+}
+
+async function rejectStaged(id) {
+  await api.approvals.reject(id);
+  loadApprovals();
+}
+
+api.on('approvals:updated', loadApprovals);
+
+// ── Weekly receipt ───────────────────────────────────────────────────────────
+async function loadReceipt() {
+  const card = document.getElementById('receipt-card');
+  if (!card) return;
+  try {
+    const r = await api.receipt.get(7);
+    if (!r || (r.runs === 0 && r.skillCount === 0)) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    const hours = (r.minutesSaved / 60).toFixed(1);
+    document.getElementById('receipt-line').textContent =
+      `${r.successes} workflow${r.successes === 1 ? '' : 's'} run · ~${hours}h saved · ${r.skillCount} skill${r.skillCount === 1 ? '' : 's'}`;
+    const bits = [];
+    if (r.topSkills.length) bits.push('Top: ' + r.topSkills.map(t => `${t.name} (${t.runs}×)`).join(', '));
+    if (r.newPatterns.length) bits.push(`${r.newPatterns.length} new pattern${r.newPatterns.length === 1 ? '' : 's'} awaiting approval`);
+    if (r.pendingApprovals) bits.push(`${r.pendingApprovals} action${r.pendingApprovals === 1 ? '' : 's'} staged for review`);
+    document.getElementById('receipt-detail').textContent = bits.join(' · ');
+  } catch(e) { console.error('receipt load error', e); }
+}
+
+api.on('receipt:ready', loadReceipt);
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadFeed();
 checkConnections();
+loadApprovals();
+api.teach.status().then(s => { teachRecording = !!s.recording; renderTeachBtn(); });
 setInterval(loadFeed, 15000);          // refresh feed every 15s
 setInterval(checkConnections, 30000);  // re-check connections every 30s
 

@@ -100,7 +100,15 @@ Rules:
 - Strip any personal data from evidence strings
 - Focus on app-switching patterns, repeated sequences, conditional behaviours
 - "condition" must describe an observable screen state (app, website, page content) so it can be checked against what's on screen right now
-- "steps" must be a concrete, executable procedure a computer-use agent can follow, e.g. ["open linkedin.com in the browser", "click the search bar", "type the job title from the persona", "press Enter"]. Use placeholders in {braces} for variable values.`;
+- "steps" must use ONLY this exact step grammar, one action per step (this is machine-parsed — do not deviate):
+    open <full-url>                  e.g. "open https://www.linkedin.com/search/results/people/?keywords=operations%20manager"
+    switch to <App Name>             e.g. "switch to Google Chrome"
+    click <element description>      e.g. "click the Connect button on the first profile result"
+    click "<button name>" in <App>   for NATIVE apps only, e.g. "click \\"New Note\\" in Notes"
+    type "<literal text>"            e.g. "type \\"operations manager fintech\\""
+    press enter | press tab | press escape
+    wait <N>s                        e.g. "wait 2s"
+  URLs must be complete (include https:// and the full path/query observed). Use {braces} placeholders only inside type/click text for values that vary per run, e.g. "type \\"{job_title}\\""`;
 }
 
 // ─── Focus category helpers ───────────────────────────────────────────────────

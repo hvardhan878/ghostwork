@@ -7,6 +7,7 @@
 import Database from "better-sqlite3";
 import * as path from "path";
 import { app } from "electron";
+import type { RankedLocator } from "./browserDriver";
 
 let _db: Database.Database | null = null;
 
@@ -89,9 +90,52 @@ function migrate(db: Database.Database): void {
       value TEXT NOT NULL
     );
 
+    -- Compiled skills: deterministic, replayable workflows with ranked locators.
+    CREATE TABLE IF NOT EXISTS skills (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id       INTEGER REFERENCES rules(id) ON DELETE SET NULL,
+      name          TEXT    NOT NULL,
+      source        TEXT    NOT NULL DEFAULT 'compiled',   -- compiled | taught
+      trigger_type  TEXT    NOT NULL DEFAULT 'context',    -- context | schedule | manual
+      trigger_value TEXT    NOT NULL DEFAULT '',           -- cron expression for schedule
+      steps         TEXT    NOT NULL DEFAULT '[]',         -- JSON SkillStep[]
+      run_count     INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      last_run_at   TEXT,
+      created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Audit log: every skill execution, step by step.
+    CREATE TABLE IF NOT EXISTS skill_runs (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      skill_id    INTEGER REFERENCES skills(id) ON DELETE CASCADE,
+      started_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT,
+      success     INTEGER,
+      mode        TEXT    NOT NULL DEFAULT 'replay',       -- replay | compile | teach
+      steps_log   TEXT    NOT NULL DEFAULT '[]',           -- JSON string[]
+      error       TEXT,
+      duration_ms INTEGER
+    );
+
+    -- Shadow-mode staging: externally visible actions await one-tap approval.
+    CREATE TABLE IF NOT EXISTS approvals (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      skill_id    INTEGER REFERENCES skills(id) ON DELETE CASCADE,
+      run_id      INTEGER REFERENCES skill_runs(id) ON DELETE CASCADE,
+      description TEXT    NOT NULL,
+      payload     TEXT    NOT NULL DEFAULT '{}',           -- JSON { remainingSteps, url }
+      status      TEXT    NOT NULL DEFAULT 'pending',      -- pending | approved | rejected
+      created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_rules_workflow ON rules(workflow_id);
     CREATE INDEX IF NOT EXISTS idx_corrections_rule ON corrections(rule_id);
     CREATE INDEX IF NOT EXISTS idx_activity_ts ON activity_log(timestamp DESC);
+    CREATE INDEX IF NOT EXISTS idx_skills_rule ON skills(rule_id);
+    CREATE INDEX IF NOT EXISTS idx_skill_runs_skill ON skill_runs(skill_id);
+    CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
   `);
 
   // Additive migrations — safe to run on every boot.
@@ -539,6 +583,214 @@ export function wipeModel(): void {
     DELETE FROM workflows;
   `);
   console.log("[db] Behaviour model wiped.");
+}
+
+// ─── Skills ───────────────────────────────────────────────────────────────────
+
+export type SkillAction = "navigate" | "click" | "fill" | "press" | "wait" | "switch_app";
+export type SkillSource = "compiled" | "taught";
+export type SkillTriggerType = "context" | "schedule" | "manual";
+
+export interface SkillStep {
+  action: SkillAction;
+  /** Human-readable caption — shown in the HUD and used for self-healing. */
+  description: string;
+  /** navigate: target URL. */
+  url?: string;
+  /** fill: text to type; press: key name; wait: seconds; switch_app: app name. */
+  value?: string;
+  /** Recorded element role (self-heal hint). */
+  role?: string;
+  /** Recorded accessible name (self-heal hint). */
+  name?: string;
+  /** Ranked locator candidates (click/fill steps). */
+  locators?: RankedLocator[];
+  /** Externally visible side effect (send/post/submit) — shadow-gated. */
+  external?: boolean;
+  /** Post-action verification. */
+  verify?: { urlIncludes?: string; textVisible?: string };
+}
+
+export interface Skill {
+  id: number;
+  rule_id: number | null;
+  name: string;
+  source: SkillSource;
+  trigger_type: SkillTriggerType;
+  trigger_value: string;
+  steps: SkillStep[];
+  run_count: number;
+  success_count: number;
+  last_run_at: string | null;
+  created_at: string;
+}
+
+interface SkillRow extends Omit<Skill, "steps"> {
+  steps: string;
+}
+
+function rowToSkill(row: SkillRow): Skill {
+  let steps: SkillStep[] = [];
+  try {
+    const parsed = JSON.parse(row.steps) as unknown;
+    if (Array.isArray(parsed)) steps = parsed as SkillStep[];
+  } catch {}
+  return { ...row, steps };
+}
+
+export function createSkill(
+  name: string,
+  steps: SkillStep[],
+  source: SkillSource = "compiled",
+  ruleId: number | null = null
+): Skill {
+  const db = getDb();
+  // One skill per rule — replace existing compiled skill on re-learn.
+  if (ruleId != null) {
+    db.prepare("DELETE FROM skills WHERE rule_id = ? AND source = 'compiled'").run(ruleId);
+  }
+  const info = db.prepare(`
+    INSERT INTO skills (rule_id, name, source, steps)
+    VALUES (?, ?, ?, ?)
+  `).run(ruleId, name, source, JSON.stringify(steps));
+  return getSkillById(info.lastInsertRowid as number)!;
+}
+
+export function getSkillById(id: number): Skill | null {
+  const row = getDb().prepare("SELECT * FROM skills WHERE id = ?").get(id) as SkillRow | undefined;
+  return row ? rowToSkill(row) : null;
+}
+
+export function getSkillForRule(ruleId: number): Skill | null {
+  const row = getDb()
+    .prepare("SELECT * FROM skills WHERE rule_id = ? ORDER BY id DESC LIMIT 1")
+    .get(ruleId) as SkillRow | undefined;
+  return row ? rowToSkill(row) : null;
+}
+
+export function getAllSkills(): Skill[] {
+  const rows = getDb()
+    .prepare("SELECT * FROM skills ORDER BY last_run_at DESC, id DESC")
+    .all() as SkillRow[];
+  return rows.map(rowToSkill);
+}
+
+export function updateSkillSteps(id: number, steps: SkillStep[]): void {
+  getDb()
+    .prepare("UPDATE skills SET steps = ? WHERE id = ?")
+    .run(JSON.stringify(steps), id);
+}
+
+export function setSkillTrigger(id: number, type: SkillTriggerType, value = ""): void {
+  getDb()
+    .prepare("UPDATE skills SET trigger_type = ?, trigger_value = ? WHERE id = ?")
+    .run(type, value, id);
+}
+
+export function deleteSkill(id: number): void {
+  getDb().prepare("DELETE FROM skills WHERE id = ?").run(id);
+}
+
+// ─── Skill runs (audit log) ───────────────────────────────────────────────────
+
+export interface SkillRun {
+  id: number;
+  skill_id: number | null;
+  started_at: string;
+  finished_at: string | null;
+  success: number | null;
+  mode: string;
+  steps_log: string;
+  error: string | null;
+  duration_ms: number | null;
+}
+
+export function startSkillRun(skillId: number | null, mode: string): number {
+  const info = getDb()
+    .prepare("INSERT INTO skill_runs (skill_id, mode) VALUES (?, ?)")
+    .run(skillId, mode);
+  return info.lastInsertRowid as number;
+}
+
+export function finishSkillRun(
+  runId: number,
+  success: boolean,
+  stepsLog: string[],
+  error?: string,
+  durationMs?: number
+): void {
+  const db = getDb();
+  db.prepare(`
+    UPDATE skill_runs SET
+      finished_at = datetime('now'), success = ?, steps_log = ?, error = ?, duration_ms = ?
+    WHERE id = ?
+  `).run(success ? 1 : 0, JSON.stringify(stepsLog), error ?? null, durationMs ?? null, runId);
+
+  const run = db.prepare("SELECT skill_id FROM skill_runs WHERE id = ?").get(runId) as
+    | { skill_id: number | null }
+    | undefined;
+  if (run?.skill_id != null) {
+    db.prepare(`
+      UPDATE skills SET
+        run_count = run_count + 1,
+        success_count = success_count + ?,
+        last_run_at = datetime('now')
+      WHERE id = ?
+    `).run(success ? 1 : 0, run.skill_id);
+  }
+}
+
+export function getRecentSkillRuns(sinceDays = 7): SkillRun[] {
+  return getDb().prepare(`
+    SELECT * FROM skill_runs
+    WHERE started_at > datetime('now', ?)
+    ORDER BY started_at DESC
+  `).all(`-${sinceDays} days`) as SkillRun[];
+}
+
+// ─── Approvals (shadow mode) ──────────────────────────────────────────────────
+
+export interface Approval {
+  id: number;
+  skill_id: number | null;
+  run_id: number | null;
+  description: string;
+  payload: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: string;
+  resolved_at: string | null;
+}
+
+export function queueApproval(
+  skillId: number | null,
+  runId: number | null,
+  description: string,
+  payload: object
+): number {
+  const info = getDb().prepare(`
+    INSERT INTO approvals (skill_id, run_id, description, payload)
+    VALUES (?, ?, ?, ?)
+  `).run(skillId, runId, description, JSON.stringify(payload));
+  return info.lastInsertRowid as number;
+}
+
+export function getPendingApprovals(): Approval[] {
+  return getDb()
+    .prepare("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at ASC")
+    .all() as Approval[];
+}
+
+export function getApprovalById(id: number): Approval | null {
+  const row = getDb().prepare("SELECT * FROM approvals WHERE id = ?").get(id) as
+    | Approval
+    | undefined;
+  return row ?? null;
+}
+
+export function resolveApproval(id: number, status: "approved" | "rejected"): void {
+  getDb()
+    .prepare("UPDATE approvals SET status = ?, resolved_at = datetime('now') WHERE id = ?")
+    .run(status, id);
 }
 
 // ─── Consolidation helpers ────────────────────────────────────────────────────

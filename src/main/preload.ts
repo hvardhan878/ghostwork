@@ -22,6 +22,31 @@ contextBridge.exposeInMainWorld("ghostwork", {
     task: (task: string, context?: string) =>
       ipcRenderer.invoke("execute:task", task, context ?? ""),
     demoRun: () => ipcRenderer.invoke("demo:run"),
+    abort: () => ipcRenderer.invoke("execute:abort"),
+  },
+
+  teach: {
+    start: () => ipcRenderer.invoke("teach:start"),
+    stop: () => ipcRenderer.invoke("teach:stop"),
+    status: () => ipcRenderer.invoke("teach:status"),
+  },
+
+  skills: {
+    list: () => ipcRenderer.invoke("skills:list"),
+    run: (id: number) => ipcRenderer.invoke("skills:run", id),
+    remove: (id: number) => ipcRenderer.invoke("skills:delete", id),
+    setTrigger: (id: number, type: string, value?: string) =>
+      ipcRenderer.invoke("skills:set-trigger", id, type, value ?? ""),
+  },
+
+  approvals: {
+    list: () => ipcRenderer.invoke("approvals:list"),
+    approve: (id: number) => ipcRenderer.invoke("approvals:approve", id),
+    reject: (id: number) => ipcRenderer.invoke("approvals:reject", id),
+  },
+
+  receipt: {
+    get: (days?: number) => ipcRenderer.invoke("receipt:get", days ?? 7),
   },
 
   db: {
@@ -74,6 +99,10 @@ contextBridge.exposeInMainWorld("ghostwork", {
       "model:updated",
       "screenpipe-mgr:status",
       "screenpipe-mgr:log",
+      "skills:updated",
+      "approvals:updated",
+      "teach:status",
+      "receipt:ready",
     ];
     if (allowed.includes(channel)) {
       ipcRenderer.on(channel, (_event, ...args) => fn(...args));

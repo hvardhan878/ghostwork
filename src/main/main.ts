@@ -50,11 +50,29 @@ import { runNightlyConsolidation } from "./consolidation";
 import { seedDemoData } from "./demo";
 import { executeWithComputerUse } from "./computerUse";
 import { startActionEngine, stopActionEngine } from "./actionEngine";
-import { handleNudgeDoIt, handleNudgeDismiss, showTestNudge } from "./nudgeWindow";
+import { handleNudgeDoIt, handleNudgeDismiss, showTestNudge, showNudgeWindow } from "./nudgeWindow";
 import {
   initScreenpipeManager,
   stopScreenpipeManager,
 } from "./screenpipeManager";
+import {
+  getAllSkills,
+  getSkillById,
+  deleteSkill,
+  setSkillTrigger,
+  SkillTriggerType,
+} from "./db";
+import { startTeaching, stopTeaching, isTeaching } from "./teachMode";
+import {
+  pendingApprovals,
+  approveAndContinue,
+  rejectApproval,
+  registerApprovalsListener,
+} from "./approvals";
+import { computeReceipt, receiptSummaryLine } from "./receipt";
+import { syncSkillSchedules, stopSkillSchedules } from "./skillScheduler";
+import { registerGhostStateSetter, GhostState } from "./ghostState";
+import { requestAbort } from "./abort";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -132,7 +150,31 @@ function scheduleJobs(): void {
     mainWindow?.webContents.send("model:updated");
   });
 
-  console.log("[cron] Jobs scheduled: hourly extraction, nightly consolidation at 2am");
+  // Weekly receipt — Monday 9am
+  cron.schedule("0 9 * * 1", () => {
+    try {
+      const receipt = computeReceipt(7);
+      const line = receiptSummaryLine(receipt);
+      console.log(`[cron] Weekly receipt: ${line}`);
+      mainWindow?.webContents.send("receipt:ready", receipt);
+      showNudgeWindow({
+        activityId: -999999,
+        ruleId: -1,
+        action: `Your week with Ghostwork: ${line}`,
+        instruction: "",
+        condition: "",
+        onDoIt: () => {
+          mainWindow?.show();
+          mainWindow?.focus();
+        },
+        onDismiss: () => {},
+      });
+    } catch (err) {
+      console.error("[cron] Receipt error:", err);
+    }
+  });
+
+  console.log("[cron] Jobs scheduled: hourly extraction, nightly consolidation 2am, weekly receipt Mon 9am");
 }
 
 // ─── IPC handlers ────────────────────────────────────────────────────────────
@@ -227,6 +269,9 @@ function registerIpcHandlers(): void {
     if (key === "openrouter_api_key") {
       process.env.OPENROUTER_API_KEY = value;
     }
+    if (key === "anthropic_api_key") {
+      process.env.ANTHROPIC_API_KEY = value;
+    }
     return true;
   });
   ipcMain.handle("settings:get", (_e, key: string, fallback = "") =>
@@ -242,9 +287,9 @@ function registerIpcHandlers(): void {
         mainWindow?.webContents.send("execute:step", { step, actionName, detail });
       });
       if (result.success) {
-        console.log(`[computer-use] ✓ Done in ${result.steps} steps`);
+        console.log(`[computer-use] ✓ Done in ${result.steps} steps (mode=${result.mode ?? "?"})`);
       } else {
-        console.error(`[computer-use] ✗ Failed after ${result.steps} steps — ${result.error}`);
+        console.error(`[computer-use] ✗ Failed after ${result.steps} steps (mode=${result.mode ?? "?"}) — ${result.error}`);
       }
       return result;
     }
@@ -335,6 +380,62 @@ function registerIpcHandlers(): void {
     return true;
   });
 
+  // ── Teach Mode ──
+  ipcMain.handle("teach:start", () => startTeaching());
+  ipcMain.handle("teach:stop", async () => {
+    const result = await stopTeaching();
+    if (result.ok) {
+      syncSkillSchedules();
+      mainWindow?.webContents.send("skills:updated");
+    }
+    return result;
+  });
+  ipcMain.handle("teach:status", () => ({ recording: isTeaching() }));
+
+  // ── Skills ──
+  ipcMain.handle("skills:list", () => getAllSkills());
+  ipcMain.handle("skills:delete", (_e, id: number) => {
+    deleteSkill(id);
+    syncSkillSchedules();
+    return true;
+  });
+  ipcMain.handle(
+    "skills:set-trigger",
+    (_e, id: number, type: string, value: string = "") => {
+      setSkillTrigger(id, type as SkillTriggerType, value);
+      syncSkillSchedules();
+      return true;
+    }
+  );
+  ipcMain.handle("skills:run", async (_e, id: number) => {
+    const skill = getSkillById(id);
+    if (!skill) return { success: false, error: "Skill not found" };
+    const { replaySkill } = await import("./skillEngine");
+    const result = await replaySkill(skill, {
+      onStep: (step, actionName, detail) =>
+        mainWindow?.webContents.send("execute:step", { step, actionName, detail }),
+    });
+    mainWindow?.webContents.send("skills:updated");
+    return result;
+  });
+
+  // ── Approvals (shadow mode) ──
+  ipcMain.handle("approvals:list", () => pendingApprovals());
+  ipcMain.handle("approvals:approve", (_e, id: number) => approveAndContinue(id));
+  ipcMain.handle("approvals:reject", (_e, id: number) => {
+    rejectApproval(id);
+    return true;
+  });
+
+  // ── Weekly receipt ──
+  ipcMain.handle("receipt:get", (_e, days: number = 7) => computeReceipt(days));
+
+  // ── Kill switch (renderer-side stop button) ──
+  ipcMain.handle("execute:abort", () => {
+    requestAbort();
+    return true;
+  });
+
   // ── Export / Wipe ──
   ipcMain.handle("db:export", async () => {
     const model = exportModel();
@@ -358,11 +459,32 @@ function registerIpcHandlers(): void {
 
 // ─── Tray ─────────────────────────────────────────────────────────────────────
 
+function applyGhostStateToTray(state: GhostState): void {
+  if (!tray) return;
+  const titles: Record<GhostState, string> = {
+    observing: "",
+    noticed: " •",
+    working: " …",
+    recording: " REC",
+  };
+  const tooltips: Record<GhostState, string> = {
+    observing: "Ghostwork — observing",
+    noticed: "Ghostwork — noticed something (suggestion waiting)",
+    working: "Ghostwork — working (Esc to stop)",
+    recording: "Ghostwork — recording a demonstration",
+  };
+  try {
+    tray.setTitle(titles[state]);
+    tray.setToolTip(tooltips[state]);
+  } catch {}
+}
+
 function createTray(): void {
   const icon = nativeImage.createFromDataURL(buildTrayIconDataURL());
   icon.setTemplateImage(true);
   tray = new Tray(icon);
-  tray.setToolTip("Ghostwork");
+  tray.setToolTip("Ghostwork — observing");
+  registerGhostStateSetter(applyGhostStateToTray);
 
   const contextMenu = Menu.buildFromTemplate([
     {
@@ -370,6 +492,24 @@ function createTray(): void {
       click: () => {
         mainWindow ? (mainWindow.show(), mainWindow.focus()) : createWindow();
       },
+    },
+    { type: "separator" },
+    {
+      label: "Teach a skill (record)",
+      click: async () => {
+        if (isTeaching()) {
+          const result = await stopTeaching();
+          mainWindow?.webContents.send("skills:updated");
+          mainWindow?.webContents.send("teach:status", { recording: false, result });
+        } else {
+          const res = await startTeaching();
+          mainWindow?.webContents.send("teach:status", { recording: res.ok, error: res.error });
+        }
+      },
+    },
+    {
+      label: "Stop execution (Esc)",
+      click: () => requestAbort(),
     },
     { type: "separator" },
     { label: "Quit", accelerator: "CmdOrCtrl+Q", click: () => app.quit() },
@@ -483,10 +623,14 @@ app.whenReady().then(async () => {
   // Startup DB state dump — helps diagnose rule/settings issues.
   logDbState();
 
-  // If user stored API key in settings, load it into env so OpenRouter can use it
+  // If user stored API keys in settings, load into env
   const storedKey = getSetting("openrouter_api_key", "");
   if (storedKey && !process.env.OPENROUTER_API_KEY) {
     process.env.OPENROUTER_API_KEY = storedKey;
+  }
+  const storedAnthropic = getSetting("anthropic_api_key", "");
+  if (storedAnthropic && !process.env.ANTHROPIC_API_KEY) {
+    process.env.ANTHROPIC_API_KEY = storedAnthropic;
   }
 
   registerIpcHandlers();
@@ -498,6 +642,12 @@ app.whenReady().then(async () => {
   await initScreenpipeManager(() => mainWindow);
 
   startActionEngine(() => mainWindow);
+
+  // Arm scheduled skills and surface approval-queue changes to the UI.
+  syncSkillSchedules();
+  registerApprovalsListener(() => {
+    mainWindow?.webContents.send("approvals:updated");
+  });
 
   // Cmd+Z — intercept if there is a pending undo from an autonomous/supervised action.
   globalShortcut.register("CommandOrControl+Z", async () => {
@@ -529,6 +679,7 @@ app.on("window-all-closed", () => { /* stay alive in tray */ });
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   stopActionEngine();
+  stopSkillSchedules();
   stopScreenpipeManager();
   mainWindow?.removeAllListeners("close");
 });

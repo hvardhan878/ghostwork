@@ -36,6 +36,7 @@ import {
 import { executeWithComputerUse } from "./computerUse";
 import { promptJSON, FAST_MODEL } from "./openrouter";
 import { showNudgeWindow } from "./nudgeWindow";
+import { setGhostState } from "./ghostState";
 
 const POLL_INTERVAL_MS = 10_000;
 const RULE_COOLDOWN_MS = 5 * 60 * 1000; // same rule won't fire more than once per 5 minutes
@@ -250,6 +251,7 @@ async function dispatch(
   const win = getWindow();
   const evidence = getEvidenceForRule(rule.workflow_id, 3);
   const instruction = executionInstruction(rule);
+  const execOpts = { steps: parseSteps(rule.action_steps), ruleId: rule.id };
 
   if (tier === "suggest") {
     const payload = {
@@ -268,10 +270,16 @@ async function dispatch(
 
     const runDoIt = () => {
       console.log(`[engine] "Do it" for rule #${rule.id}: "${rule.action.slice(0, 80)}"`);
-      return executeWithComputerUse(instruction, `Suggestion: ${rule.condition}`, () => {})
+      setGhostState("working");
+      return executeWithComputerUse(
+        instruction,
+        `Suggestion: ${rule.condition}`,
+        () => {},
+        execOpts
+      )
         .then((result) => {
           if (result.success) {
-            console.log(`[engine] Execution ✓ (${result.steps} steps)`);
+            console.log(`[engine] Execution ✓ (${result.steps} steps, mode=${result.mode ?? "?"})`);
             updateActivityStatus(activityId, "accepted");
             acceptRule(rule.id);
           } else {
@@ -280,7 +288,8 @@ async function dispatch(
             recordCorrection(rule.id, rule.action, "", "execution failed");
           }
         })
-        .catch((err) => console.error("[engine] Do it error:", err));
+        .catch((err) => console.error("[engine] Do it error:", err))
+        .finally(() => setGhostState("observing"));
     };
 
     const runDismiss = () => {
@@ -289,11 +298,13 @@ async function dispatch(
       dismissRule(rule.id);
       recordCorrection(rule.id, rule.action, "", "dismissed");
       activeNotifications.delete(activityId);
+      setGhostState("observing");
     };
 
     // macOS: native Notification action buttons require a code-signed app and
     // silent:true suppresses the banner entirely. Use a custom nudge popup instead.
     if (process.platform === "darwin") {
+      setGhostState("noticed");
       showNudgeWindow({
         activityId,
         ruleId: rule.id,
@@ -354,6 +365,7 @@ async function dispatch(
     });
 
     const supervisedSteps: string[] = [];
+    setGhostState("working");
     executeWithComputerUse(
       instruction,
       `Triggered by rule: ${rule.condition}`,
@@ -361,8 +373,10 @@ async function dispatch(
         const label = `${actionName}${detail ? " " + detail : ""}`;
         supervisedSteps.push(label);
         win?.webContents.send("engine:step", { activityId, step, actionName, detail });
-      }
+      },
+      execOpts
     ).then((result) => {
+      setGhostState("observing");
       setSetting("pending_undo", "");
       updateActivityStatus(activityId, result.success ? "accepted" : "rejected");
       if (result.success) acceptRule(rule.id);
@@ -379,6 +393,7 @@ async function dispatch(
         showNotification(`Done: ${rule.action.slice(0, 60)}`, "Press Cmd+Z to undo", activityId);
       }
     }).catch((err) => {
+      setGhostState("observing");
       setSetting("pending_undo", "");
       console.error("[engine] Supervised execution error:", err);
     });
@@ -400,13 +415,16 @@ async function dispatch(
     });
 
     const autonomousSteps: string[] = [];
+    setGhostState("working");
     executeWithComputerUse(
       instruction,
       `Autonomous rule: ${rule.condition}`,
       (step, actionName, detail) => {
         autonomousSteps.push(`${actionName}${detail ? " " + detail : ""}`);
-      }
+      },
+      execOpts
     ).then((result) => {
+      setGhostState("observing");
       setSetting("pending_undo", "");
       updateActivityStatus(activityId, result.success ? "silent" : "rejected");
       if (result.success) acceptRule(rule.id);
@@ -417,6 +435,7 @@ async function dispatch(
         error: result.error,
       });
     }).catch((err) => {
+      setGhostState("observing");
       setSetting("pending_undo", "");
       console.error("[engine] Autonomous execution error:", err);
     });

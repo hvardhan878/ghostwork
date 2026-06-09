@@ -1,18 +1,11 @@
 /**
- * Computer use executor.
+ * Hybrid computer-use executor.
  *
- * Calls Claude (via OpenRouter's Anthropic-compatible endpoint) with the
- * computer_20251124 tool.  Each tool_use block Claude returns is executed
- * locally using:
- *   - screencapture (macOS built-in) for screenshots
- *   - Python + Quartz CoreGraphics for mouse (CGEvent — reliable on M1/M2)
- *   - osascript / AppleScript for keyboard (keystroke / key code)
- *   - pbcopy + Cmd+V for text input (handles unicode / special chars)
+ * 1. Deterministic steps (URLs, app switch, keys) via stepRunner — no LLM.
+ * 2. Anthropic native computer_20250124 if ANTHROPIC_API_KEY is set.
+ * 3. OpenRouter chat/completions + computer_action function tool (vision fallback).
  *
- * Display coordinates:
- *   screencapture produces images at physical (Retina) resolution.
- *   We tell Claude that resolution.  Claude returns coords in that space.
- *   CGEvent operates in logical (point) space → we divide by scaleFactor.
+ * Local actions: screencapture, Python Quartz mouse, AppleScript keyboard, pbcopy+Cmd+V.
  */
 
 import { screen } from "electron";
@@ -20,13 +13,15 @@ import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import { runDeterministicSteps } from "./stepRunner";
+import { beginExecution, endExecution, checkAbort, AbortedError } from "./abort";
 
-const MESSAGES_URL = "https://openrouter.ai/api/v1/messages";
-const MODEL = "anthropic/claude-sonnet-4-5";
+const CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
+const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const OPENROUTER_MODEL = "anthropic/claude-sonnet-4-5";
+const ANTHROPIC_MODEL = "claude-sonnet-4-5";
 const MAX_STEPS = 30;
 
-// Sonnet 4.5 uses the Jan 2025 computer-use tool, not the Nov 2025 version.
-// See: https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool
 const COMPUTER_USE_BETA = "computer-use-2025-01-24";
 const COMPUTER_TOOL_TYPE = "computer_20250124";
 
@@ -42,6 +37,19 @@ export interface ExecuteResult {
   steps: number;
   lastText: string;
   error?: string;
+  /** How execution was performed (for logging). */
+  mode?: "skill" | "compiled" | "deterministic" | "anthropic" | "openrouter";
+  /** Run paused: external step staged in the approval queue. */
+  staged?: boolean;
+}
+
+export interface ExecuteOptions {
+  /** Stored workflow steps — tried deterministically before LLM. */
+  steps?: string[];
+  /** Rule this execution belongs to — compiled skills are keyed by rule. */
+  ruleId?: number;
+  /** Allow externally visible steps without shadow-mode staging. */
+  externalAllowed?: boolean;
 }
 
 interface ComputerAction {
@@ -100,10 +108,61 @@ function takeScreenshot(): string {
 
 // ─── Low-level executors ──────────────────────────────────────────────────────
 
+/**
+ * Mouse backend ladder. The previous implementation assumed `python3` had
+ * PyObjC Quartz — when it didn't, every click silently failed and the vision
+ * agent flailed. Now we probe once and degrade gracefully:
+ *   1. Quartz CGEvent via any python that can import it (best: all buttons, drag, scroll)
+ *   2. cliclick (brew) — clicks/moves/drags, scroll approximated with keys
+ *   3. AppleScript "click at" — left clicks only, scroll via Page Up/Down keys
+ */
+type MouseBackend = "quartz" | "cliclick" | "applescript";
+
+let _mouseBackend: MouseBackend | null = null;
+let _pythonBin = "python3";
+
+function detectMouseBackend(): MouseBackend {
+  if (_mouseBackend) return _mouseBackend;
+
+  const pythons = [
+    "python3",
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+    "/usr/bin/python3",
+  ];
+  for (const bin of pythons) {
+    try {
+      execSync(`"${bin}" -c "import Quartz.CoreGraphics"`, {
+        timeout: 8000,
+        stdio: "pipe",
+      });
+      _pythonBin = bin;
+      _mouseBackend = "quartz";
+      console.log(`[computer-use] Mouse backend: Quartz CGEvent via ${bin}`);
+      return _mouseBackend;
+    } catch {}
+  }
+
+  try {
+    execSync("which cliclick", { timeout: 3000, stdio: "pipe" });
+    _mouseBackend = "cliclick";
+    console.log("[computer-use] Mouse backend: cliclick");
+    return _mouseBackend;
+  } catch {}
+
+  _mouseBackend = "applescript";
+  console.warn(
+    "[computer-use] Mouse backend: AppleScript (degraded — left-click only). " +
+      "For full mouse support run: pip3 install pyobjc-framework-Quartz  OR  brew install cliclick"
+  );
+  return _mouseBackend;
+}
+
 function runPython(code: string): void {
+  detectMouseBackend();
   fs.writeFileSync(PY_PATH, code, "utf-8");
   try {
-    execSync(`python3 "${PY_PATH}"`, { timeout: 10000 });
+    execSync(`"${_pythonBin}" "${PY_PATH}"`, { timeout: 10000, stdio: "pipe" });
   } finally {
     try {
       fs.unlinkSync(PY_PATH);
@@ -126,13 +185,23 @@ function runAppleScript(script: string): string {
 
 // ─── Mouse ────────────────────────────────────────────────────────────────────
 
+function runCliclick(args: string): void {
+  execSync(`cliclick ${args}`, { timeout: 10000, stdio: "pipe" });
+}
+
 function mouseMove(lx: number, ly: number): void {
-  runPython(`
+  const backend = detectMouseBackend();
+  if (backend === "quartz") {
+    runPython(`
 from Quartz.CoreGraphics import CGWarpMouseCursorPosition, CGPointMake
 import time
 CGWarpMouseCursorPosition(CGPointMake(${lx}, ${ly}))
 time.sleep(0.05)
 `);
+  } else if (backend === "cliclick") {
+    runCliclick(`m:${Math.round(lx)},${Math.round(ly)}`);
+  }
+  // applescript backend: no separate move primitive — click includes position
 }
 
 function mouseClick(
@@ -141,6 +210,37 @@ function mouseClick(
   button: "left" | "right" | "middle" = "left",
   clickCount = 1
 ): void {
+  const backend = detectMouseBackend();
+  const x = Math.round(lx);
+  const y = Math.round(ly);
+
+  if (backend === "cliclick") {
+    const cmd =
+      button === "right"
+        ? `rc:${x},${y}`
+        : clickCount === 2
+          ? `dc:${x},${y}`
+          : clickCount === 3
+            ? `tc:${x},${y}`
+            : `c:${x},${y}`;
+    runCliclick(cmd);
+    return;
+  }
+
+  if (backend === "applescript") {
+    if (button !== "left") {
+      throw new Error(
+        `${button}-click unsupported without Quartz/cliclick. Install: pip3 install pyobjc-framework-Quartz`
+      );
+    }
+    for (let i = 0; i < clickCount; i++) {
+      runAppleScript(
+        `tell application "System Events" to click at {${x}, ${y}}`
+      );
+    }
+    return;
+  }
+
   const down =
     button === "left"
       ? "kCGEventLeftMouseDown"
@@ -186,6 +286,21 @@ function mouseDrag(
   lx2: number,
   ly2: number
 ): void {
+  const backend = detectMouseBackend();
+
+  if (backend === "cliclick") {
+    runCliclick(
+      `dd:${Math.round(lx1)},${Math.round(ly1)} du:${Math.round(lx2)},${Math.round(ly2)}`
+    );
+    return;
+  }
+
+  if (backend === "applescript") {
+    throw new Error(
+      "Drag unsupported without Quartz/cliclick. Install: pip3 install pyobjc-framework-Quartz"
+    );
+  }
+
   runPython(`
 from Quartz.CoreGraphics import *
 import time
@@ -221,6 +336,21 @@ function mouseScroll(
   direction: string,
   amount: number
 ): void {
+  const backend = detectMouseBackend();
+
+  if (backend !== "quartz") {
+    // No scroll-wheel primitive — approximate with Page Up/Down after clicking
+    // the target area to focus it.
+    try {
+      mouseClick(lx, ly, "left", 1);
+    } catch {}
+    const key = direction === "up" ? "Page_Up" : "Page_Down";
+    for (let i = 0; i < Math.max(1, Math.min(amount, 5)); i++) {
+      pressKey(key);
+    }
+    return;
+  }
+
   const dy =
     direction === "up" ? amount : direction === "down" ? -amount : 0;
   const dx =
@@ -365,37 +495,288 @@ function executeComputerAction(
   }
 }
 
-// ─── Main loop ────────────────────────────────────────────────────────────────
+function argsToComputerAction(args: Record<string, unknown>): ComputerAction | null {
+  const action = String(args.action ?? "");
+  if (action === "done") return { action: "done" };
+  return {
+    action,
+    coordinate:
+      args.x != null && args.y != null
+        ? [Number(args.x), Number(args.y)]
+        : undefined,
+    start_coordinate:
+      args.start_x != null && args.start_y != null
+        ? [Number(args.start_x), Number(args.start_y)]
+        : undefined,
+    text: args.text != null ? String(args.text) : undefined,
+    direction: args.direction != null ? String(args.direction) : undefined,
+    amount: args.amount != null ? Number(args.amount) : undefined,
+    duration: args.duration_ms != null ? Number(args.duration_ms) : undefined,
+  };
+}
 
-export async function executeWithComputerUse(
+// ─── OpenRouter vision + function-calling loop ───────────────────────────────
+
+type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+type ChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string | ChatContentPart[];
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
+  tool_call_id?: string;
+};
+
+function buildVisionTool(physW: number, physH: number) {
+  return {
+    type: "function" as const,
+    function: {
+      name: "computer_action",
+      description: `Perform one macOS desktop action. Screenshot size: ${physW}x${physH}px, origin top-left.`,
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: [
+              "screenshot",
+              "mouse_move",
+              "left_click",
+              "right_click",
+              "double_click",
+              "type",
+              "key",
+              "scroll",
+              "wait",
+              "done",
+            ],
+          },
+          x: { type: "number" },
+          y: { type: "number" },
+          start_x: { type: "number" },
+          start_y: { type: "number" },
+          text: { type: "string" },
+          direction: { type: "string", enum: ["up", "down", "left", "right"] },
+          amount: { type: "number" },
+          duration_ms: { type: "number" },
+          message: { type: "string", description: "Summary when action is done" },
+        },
+        required: ["action"],
+      },
+    },
+  };
+}
+
+async function executeOpenRouterVision(
   task: string,
-  context = "",
-  onStep?: (step: number, action: string, detail?: string) => void
+  context: string,
+  onStep: ((step: number, action: string, detail?: string) => void) | undefined,
+  apiKey: string,
+  scale: number,
+  physW: number,
+  physH: number
 ): Promise<ExecuteResult> {
-  const key = process.env.OPENROUTER_API_KEY ?? "";
-  if (!key) {
-    return { success: false, steps: 0, lastText: "", error: "No OPENROUTER_API_KEY set" };
+  const systemPrompt = [
+    "You are a macOS desktop automation agent.",
+    `The screen is ${physW}x${physH} pixels. Use computer_action for each step.`,
+    "Call computer_action with action=done when finished.",
+    context ? `Context: ${context}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  let screenshot: string;
+  try {
+    screenshot = takeScreenshot();
+  } catch (err) {
+    return {
+      success: false,
+      steps: 0,
+      lastText: "",
+      error: `Screenshot failed: ${err instanceof Error ? err.message : String(err)}`,
+      mode: "openrouter",
+    };
   }
 
-  const { logW, logH, scale } = getDisplay();
-  const physW = Math.round(logW * scale);
-  const physH = Math.round(logH * scale);
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemPrompt },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: task },
+        { type: "image_url", image_url: { url: `data:image/png;base64,${screenshot}` } },
+      ],
+    },
+  ];
 
+  let lastText = "";
+  let steps = 0;
+
+  for (let i = 0; i < MAX_STEPS; i++) {
+    checkAbort();
+    steps = i + 1;
+
+    let res: Response;
+    try {
+      res = await fetch(CHAT_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "HTTP-Referer": "https://ghostwork.app",
+          "X-Title": "Ghostwork",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: OPENROUTER_MODEL,
+          max_tokens: 1024,
+          messages,
+          tools: [buildVisionTool(physW, physH)],
+          tool_choice: "auto",
+        }),
+        signal: AbortSignal.timeout(90000),
+      });
+    } catch (err) {
+      return {
+        success: false,
+        steps,
+        lastText,
+        error: `API request failed: ${err instanceof Error ? err.message : String(err)}`,
+        mode: "openrouter",
+      };
+    }
+
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return {
+        success: false,
+        steps,
+        lastText,
+        error: `API ${res.status}: ${body.slice(0, 300)}`,
+        mode: "openrouter",
+      };
+    }
+
+    const data = await res.json();
+    const choice = data.choices?.[0];
+    const msg = choice?.message;
+    if (!msg) {
+      return { success: false, steps, lastText, error: "Empty model response", mode: "openrouter" };
+    }
+
+    if (msg.content) lastText = typeof msg.content === "string" ? msg.content : lastText;
+
+    const toolCalls = msg.tool_calls ?? [];
+    if (toolCalls.length === 0) {
+      console.log(`[computer-use:openrouter] Done in ${steps} steps`);
+      return { success: true, steps, lastText, mode: "openrouter" };
+    }
+
+    messages.push({
+      role: "assistant",
+      content: msg.content ?? "",
+      tool_calls: toolCalls,
+    });
+
+    for (const tc of toolCalls) {
+      if (tc.function.name !== "computer_action") continue;
+
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
+      } catch {
+        messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: "Error: invalid JSON arguments",
+        });
+        continue;
+      }
+
+      if (args.action === "done") {
+        lastText = String(args.message ?? lastText);
+        console.log(`[computer-use:openrouter] Done in ${steps} steps`);
+        return { success: true, steps, lastText, mode: "openrouter" };
+      }
+
+      const input = argsToComputerAction(args);
+      if (!input) continue;
+
+      const detail =
+        input.coordinate
+          ? `(${input.coordinate.join(",")})`
+          : input.text
+            ? `"${input.text.slice(0, 40)}"`
+            : "";
+      console.log(`[computer-use:openrouter] Step ${steps}: ${input.action} ${detail}`);
+      onStep?.(steps, input.action, detail);
+
+      let resultText = "OK";
+      try {
+        const results = executeComputerAction(input, scale);
+        resultText = results
+          .map((r) => (r.type === "text" ? r.text : "[screenshot taken]"))
+          .join("; ");
+      } catch (err) {
+        resultText = `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      messages.push({ role: "tool", tool_call_id: tc.id, content: resultText });
+
+      // Send updated screenshot for next turn.
+      try {
+        screenshot = takeScreenshot();
+        messages.push({
+          role: "user",
+          content: [
+            { type: "text", text: "Updated screen after last action:" },
+            { type: "image_url", image_url: { url: `data:image/png;base64,${screenshot}` } },
+          ],
+        });
+      } catch {
+        // Continue without image if capture fails.
+      }
+    }
+  }
+
+  return {
+    success: false,
+    steps,
+    lastText,
+    error: `Reached max steps (${MAX_STEPS})`,
+    mode: "openrouter",
+  };
+}
+
+// ─── Anthropic native computer-use loop ───────────────────────────────────────
+
+async function executeAnthropicNative(
+  task: string,
+  context: string,
+  onStep: ((step: number, action: string, detail?: string) => void) | undefined,
+  apiKey: string,
+  scale: number,
+  physW: number,
+  physH: number
+): Promise<ExecuteResult> {
   const systemPrompt = [
     "You are a macOS desktop automation agent acting on behalf of a user.",
     "Take a screenshot first to see the current state, then complete the task efficiently.",
-    "Be precise with coordinates. Complete the task and stop — do not take unnecessary actions.",
+    "Be precise with coordinates. Complete the task and stop.",
     context ? `Current context: ${context}` : "",
   ]
     .filter(Boolean)
     .join("\n");
 
-  // Seed with initial screenshot so Claude knows where things are
   let initialScreenshot: string | undefined;
   try {
     initialScreenshot = takeScreenshot();
   } catch (err) {
-    console.warn("[computer-use] Could not take initial screenshot:", err);
+    console.warn("[computer-use:anthropic] Could not take initial screenshot:", err);
   }
 
   const firstContent: ContentBlock[] = [
@@ -415,27 +796,25 @@ export async function executeWithComputerUse(
   ];
 
   const messages: Message[] = [{ role: "user", content: firstContent }];
-
   let lastText = "";
   let steps = 0;
 
   for (let i = 0; i < MAX_STEPS; i++) {
+    checkAbort();
     steps = i + 1;
 
     let res: Response;
     try {
-      res = await fetch(MESSAGES_URL, {
+      res = await fetch(ANTHROPIC_MESSAGES_URL, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${key}`,
+          "x-api-key": apiKey,
           "anthropic-version": "2023-06-01",
           "anthropic-beta": COMPUTER_USE_BETA,
-          "HTTP-Referer": "https://ghostwork.app",
-          "X-Title": "Ghostwork",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          model: MODEL,
+          model: ANTHROPIC_MODEL,
           max_tokens: 4096,
           system: systemPrompt,
           tools: [
@@ -456,12 +835,19 @@ export async function executeWithComputerUse(
         steps,
         lastText,
         error: `API request failed: ${err instanceof Error ? err.message : String(err)}`,
+        mode: "anthropic",
       };
     }
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      return { success: false, steps, lastText, error: `API ${res.status}: ${body.slice(0, 300)}` };
+      return {
+        success: false,
+        steps,
+        lastText,
+        error: `API ${res.status}: ${body.slice(0, 300)}`,
+        mode: "anthropic",
+      };
     }
 
     const data = await res.json();
@@ -475,15 +861,20 @@ export async function executeWithComputerUse(
     messages.push({ role: "assistant", content });
 
     if (stopReason === "end_turn") {
-      console.log(`[computer-use] Done in ${steps} steps. "${lastText.slice(0, 80)}"`);
-      return { success: true, steps, lastText };
+      console.log(`[computer-use:anthropic] Done in ${steps} steps`);
+      return { success: true, steps, lastText, mode: "anthropic" };
     }
 
     if (stopReason !== "tool_use") {
-      return { success: false, steps, lastText, error: `stop_reason=${stopReason}` };
+      return {
+        success: false,
+        steps,
+        lastText,
+        error: `stop_reason=${stopReason}`,
+        mode: "anthropic",
+      };
     }
 
-    // Execute tool use blocks
     const toolResults: ContentBlock[] = [];
     for (const block of content) {
       if (block.type !== "tool_use" || block.name !== "computer") continue;
@@ -496,7 +887,7 @@ export async function executeWithComputerUse(
             ? `"${block.input.text.slice(0, 40)}"`
             : "";
 
-      console.log(`[computer-use] Step ${steps}: ${actionName} ${detail}`);
+      console.log(`[computer-use:anthropic] Step ${steps}: ${actionName} ${detail}`);
       onStep?.(steps, actionName, detail);
 
       let result: ToolResultContent[];
@@ -504,7 +895,6 @@ export async function executeWithComputerUse(
         result = executeComputerAction(block.input, scale);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[computer-use] Action error (${actionName}):`, msg);
         result = [{ type: "text", text: `Error: ${msg}` }];
       }
 
@@ -518,5 +908,176 @@ export async function executeWithComputerUse(
     messages.push({ role: "user", content: toolResults });
   }
 
-  return { success: false, steps, lastText, error: `Reached max steps (${MAX_STEPS})` };
+  return {
+    success: false,
+    steps,
+    lastText,
+    error: `Reached max steps (${MAX_STEPS})`,
+    mode: "anthropic",
+  };
+}
+
+// ─── Main entry — execution router ───────────────────────────────────────────
+//
+// Order: compiled skill replay → CDP plan-then-execute (browser tasks)
+//        → legacy deterministic steps → pixel fallback (Anthropic/OpenRouter).
+
+function extractUrlHint(task: string, steps: string[]): string | undefined {
+  const urlRe = /(https?:\/\/\S+|(?:[\w-]+\.)+(?:com|net|org|io|ai|co|app|dev)\S*)/i;
+  for (const s of steps) {
+    const m = s.match(urlRe);
+    if (m) return m[1];
+  }
+  const m = task.match(urlRe);
+  return m?.[1];
+}
+
+function looksBrowserTask(task: string, steps: string[]): boolean {
+  if (extractUrlHint(task, steps)) return true;
+  return /\b(browser|website|web page|tab|chrome|linkedin|gmail|google|search results?|url)\b/i.test(
+    `${task} ${steps.join(" ")}`
+  );
+}
+
+export async function executeWithComputerUse(
+  task: string,
+  context = "",
+  onStep?: (step: number, action: string, detail?: string) => void,
+  options?: ExecuteOptions
+): Promise<ExecuteResult> {
+  beginExecution();
+  try {
+    return await routeExecution(task, context, onStep, options);
+  } catch (err) {
+    if (err instanceof AbortedError) {
+      return { success: false, steps: 0, lastText: "", error: "Aborted by user (Esc)" };
+    }
+    throw err;
+  } finally {
+    endExecution();
+  }
+}
+
+async function routeExecution(
+  task: string,
+  context: string,
+  onStep?: (step: number, action: string, detail?: string) => void,
+  options?: ExecuteOptions
+): Promise<ExecuteResult> {
+  const { logW, logH, scale } = getDisplay();
+  const physW = Math.round(logW * scale);
+  const physH = Math.round(logH * scale);
+
+  const storedSteps = options?.steps?.filter(Boolean) ?? [];
+
+  // Lazy import to avoid loading playwright until execution actually happens.
+  const skillEngine = await import("./skillEngine");
+  const db = await import("./db");
+  const browserDriver = await import("./browserDriver");
+
+  // 1) Compiled skill replay — deterministic, zero tokens, human speed.
+  if (options?.ruleId != null) {
+    const skill = db.getSkillForRule(options.ruleId);
+    if (skill && skill.steps.length > 0) {
+      console.log(`[computer-use] Replaying compiled skill #${skill.id} (${skill.steps.length} steps)`);
+      const res = await skillEngine.replaySkill(skill, {
+        externalAllowed: options.externalAllowed,
+        onStep,
+      });
+      if (res.success) {
+        return {
+          success: true,
+          steps: res.stepsExecuted,
+          lastText: res.stepsLog.slice(-1)[0] ?? "Skill replayed",
+          mode: "skill",
+          staged: res.staged,
+        };
+      }
+      console.warn(`[computer-use] Skill replay failed (${res.error}) — recompiling`);
+    }
+  }
+
+  // 2) Browser plan-then-execute (DOM/AX perception — no vision tokens).
+  const browserish = looksBrowserTask(task, storedSteps);
+  const cdpAlready = await browserDriver.isAvailable();
+  if (browserish || cdpAlready) {
+    try {
+      console.log("[computer-use] Using browser engine (CDP plan-then-execute)");
+      const res = await skillEngine.compileAndRun(task, context, {
+        ruleId: options?.ruleId,
+        startUrl: extractUrlHint(task, storedSteps),
+        externalAllowed: options?.externalAllowed,
+        onStep,
+      });
+      if (res.success) {
+        return {
+          success: true,
+          steps: res.stepsExecuted,
+          lastText: res.stepsLog.slice(-1)[0] ?? "Done",
+          mode: "compiled",
+          staged: res.staged,
+        };
+      }
+      console.warn(`[computer-use] Browser engine failed (${res.error}) — falling back`);
+      context = [context, `Browser engine already tried and failed: ${res.error}`]
+        .filter(Boolean)
+        .join(". ");
+    } catch (err) {
+      if (err instanceof AbortedError) throw err;
+      console.warn(
+        `[computer-use] Browser engine unavailable (${err instanceof Error ? err.message : err}) — falling back`
+      );
+    }
+  }
+
+  // 3) Legacy deterministic steps (URL opens / app switches without CDP).
+  if (storedSteps.length > 0) {
+    console.log(`[computer-use] Trying ${storedSteps.length} stored step(s) deterministically…`);
+    const det = await runDeterministicSteps(storedSteps, onStep);
+    if (det.success) {
+      console.log(`[computer-use] All ${det.completedSteps} steps completed deterministically`);
+      return {
+        success: true,
+        steps: det.completedSteps,
+        lastText: `Completed ${det.completedSteps} steps`,
+        mode: "deterministic",
+      };
+    }
+    if (det.completedSteps > 0) {
+      context = [context, `Already completed steps: ${storedSteps.slice(0, det.completedSteps).join("; ")}`]
+        .filter(Boolean)
+        .join(". ");
+    }
+  }
+
+  const anthropicKey = process.env.ANTHROPIC_API_KEY ?? "";
+  const openrouterKey = process.env.OPENROUTER_API_KEY ?? "";
+
+  // 4) Pixel fallback — Anthropic native computer use (best quality).
+  if (anthropicKey) {
+    console.log("[computer-use] Using Anthropic native computer use (pixel fallback)");
+    return executeAnthropicNative(task, context, onStep, anthropicKey, scale, physW, physH);
+  }
+
+  // 5) Pixel fallback — OpenRouter vision + function calling.
+  if (openrouterKey) {
+    console.log("[computer-use] Using OpenRouter vision + function calling (pixel fallback)");
+    return executeOpenRouterVision(
+      task,
+      context,
+      onStep,
+      openrouterKey,
+      scale,
+      physW,
+      physH
+    );
+  }
+
+  return {
+    success: false,
+    steps: 0,
+    lastText: "",
+    error:
+      "No API key for execution. Add ANTHROPIC_API_KEY (recommended) or OPENROUTER_API_KEY in Settings.",
+  };
 }

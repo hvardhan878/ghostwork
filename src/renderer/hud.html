@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body {
+    margin: 0; padding: 0; background: transparent; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    user-select: none; -webkit-user-select: none;
+  }
+  .hud {
+    display: flex; align-items: center; gap: 10px;
+    height: 36px; margin: 4px;
+    padding: 0 14px;
+    background: rgba(13, 13, 13, 0.92);
+    border: 1px solid rgba(120, 120, 255, 0.45);
+    border-radius: 18px;
+    box-shadow: 0 2px 14px rgba(80, 80, 255, 0.25);
+    color: #e8e8f0;
+  }
+  .ghost {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #8a8aff;
+    animation: pulse 1.2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(0.8); }
+  }
+  .label { font-size: 11px; font-weight: 600; color: #a9a9ff; white-space: nowrap; }
+  #caption {
+    font-size: 12px; color: #d6d6e2; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1;
+  }
+  .esc {
+    font-size: 10px; color: #77778a; border: 1px solid #3a3a4a;
+    border-radius: 4px; padding: 1px 6px; white-space: nowrap; flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+  <div class="hud">
+    <div class="ghost"></div>
+    <span class="label">GHOST IS DRIVING</span>
+    <span id="caption"></span>
+    <span class="esc">Esc to stop</span>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    document.getElementById('caption').textContent = params.get('caption') || '';
+  </script>
+</body>
+</html>
