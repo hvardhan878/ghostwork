@@ -94,4 +94,4 @@ src/
 
 ## License
 
-This project is licensed under the **Ghostwork Non-Commercial License**. You may use, modify, and share it for **non-commercial purposes only**. Commercial use is not permitted. See [LICENSE](LICENSE) for full terms.
+This project is licensed under the [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html). You may use, modify, and redistribute it freely — including commercially — as long as derivative works remain open source under the same license. See [LICENSE](LICENSE) for full terms.
