@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'" />
+  <title>Ghostwork</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d0d0d;
+      --surface: #141414;
+      --surface2: #1a1a1a;
+      --border: #242424;
+      --border-light: #2e2e2e;
+      --text: #e0e0e0;
+      --text-muted: #5a5a5a;
+      --text-dim: #303030;
+      --green: #22c55e;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --blue: #3b82f6;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      --mono: "SF Mono", "Fira Code", ui-monospace, monospace;
+    }
+
+    html, body { width:100%; height:100%; background:var(--bg); color:var(--text);
+      font-family:var(--font); font-size:13px; -webkit-font-smoothing:antialiased; }
+
+    /* ── Layout ── */
+    .app { display:flex; flex-direction:column; height:100vh; }
+
+    .titlebar {
+      height:52px; display:flex; align-items:center; gap:0;
+      padding-left:76px; border-bottom:1px solid var(--border);
+      background:var(--surface); flex-shrink:0; -webkit-app-region:drag;
+    }
+
+    .nav { display:flex; align-items:center; gap:1px; -webkit-app-region:no-drag; }
+    .nav-btn {
+      padding:6px 14px; border:none; background:none; color:var(--text-muted);
+      font-size:12px; font-family:var(--font); cursor:pointer; border-radius:6px;
+      transition:color .15s, background .15s; letter-spacing:0.03em;
+    }
+    .nav-btn:hover { color:var(--text); background:var(--surface2); }
+    .nav-btn.active { color:var(--text); background:var(--border); }
+
+    .titlebar-right {
+      margin-left:auto; padding-right:16px; display:flex; align-items:center; gap:8px;
+      -webkit-app-region:no-drag;
+    }
+
+    .status-pill {
+      display:flex; align-items:center; gap:5px; padding:4px 10px;
+      border:1px solid var(--border); border-radius:20px; background:var(--bg);
+    }
+    .dot { width:5px; height:5px; border-radius:50%; background:var(--text-dim); flex-shrink:0; }
+    .dot.ok { background:var(--green); box-shadow:0 0 5px var(--green); }
+    .dot.err { background:var(--red); }
+    .dot.warn { background:var(--amber); }
+    .dot.pulse { animation:pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+    .pill-label { font-size:11px; color:var(--text-muted); }
+
+    /* ── Views ── */
+    .view { display:none; flex:1; overflow:hidden; flex-direction:column; }
+    .view.active { display:flex; }
+
+    .scroll { flex:1; overflow-y:auto; padding:28px 32px; }
+
+    /* ── Sidebar layout (suggestion) ── */
+    .main-layout { display:flex; flex:1; overflow:hidden; }
+    .feed-area { flex:1; overflow-y:auto; padding:28px 32px; }
+    .sidebar {
+      width:260px; border-left:1px solid var(--border); background:var(--surface);
+      display:flex; flex-direction:column; flex-shrink:0; overflow:hidden;
+    }
+    .sidebar-header {
+      padding:14px 16px; border-bottom:1px solid var(--border);
+      font-size:11px; color:var(--text-muted); letter-spacing:0.08em; text-transform:uppercase;
+    }
+    .sidebar-content { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+    .sidebar-empty { color:var(--text-dim); font-size:12px; text-align:center; padding:24px 0; }
+
+    /* ── Section title ── */
+    .section-title {
+      font-size:11px; font-weight:500; letter-spacing:0.1em; text-transform:uppercase;
+      color:var(--text-muted); margin-bottom:16px;
+    }
+
+    /* ── Activity feed ── */
+    .feed { display:flex; flex-direction:column; gap:1px; }
+    .feed-item {
+      display:flex; align-items:flex-start; gap:14px; padding:12px 0;
+      border-bottom:1px solid var(--border);
+    }
+    .feed-item:last-child { border-bottom:none; }
+    .feed-ts { font-size:11px; color:var(--text-dim); flex-shrink:0; margin-top:1px; font-family:var(--mono); width:52px; }
+    .feed-body { flex:1; }
+    .feed-workflow { font-size:11px; color:var(--text-muted); margin-bottom:3px; }
+    .feed-action { font-size:13px; color:var(--text); }
+    .feed-meta { display:flex; align-items:center; gap:8px; margin-top:6px; }
+    .confidence-badge {
+      font-size:10px; padding:2px 7px; border-radius:10px; font-weight:500; letter-spacing:0.05em;
+    }
+    .conf-learning { background:#1a1a1a; color:#666; border:1px solid #2a2a2a; }
+    .conf-confident { background:#2a1f00; color:var(--amber); border:1px solid #3a2900; }
+    .conf-autonomous { background:#0a2010; color:var(--green); border:1px solid #0f3020; }
+
+    .status-badge {
+      font-size:10px; color:var(--text-dim); padding:2px 7px; border-radius:10px;
+      border:1px solid var(--text-dim);
+    }
+    .status-badge.accepted { color:var(--green); border-color:#1a4020; }
+    .status-badge.rejected { color:var(--red); border-color:#3a1010; }
+    .status-badge.silent { color:#444; border-color:#222; }
+    .status-badge.undone { color:var(--amber); border-color:#3a2900; }
+
+    .feed-actions { display:flex; gap:6px; margin-top:8px; }
+    .btn-sm {
+      padding:4px 10px; border-radius:6px; font-size:11px; cursor:pointer;
+      border:1px solid var(--border); background:none; color:var(--text-muted);
+      font-family:var(--font); transition:all .15s;
+    }
+    .btn-sm:hover { color:var(--text); border-color:var(--border-light); }
+    .btn-sm.accept:hover { color:var(--green); border-color:var(--green); }
+    .btn-sm.reject:hover { color:var(--red); border-color:var(--red); }
+
+    .feed-empty { text-align:center; color:var(--text-dim); padding:60px 0; font-size:13px; }
+    .demo-chip {
+      font-size:9px; font-weight:700; letter-spacing:0.1em;
+      padding:2px 6px; border-radius:8px;
+      background:#0a1a0a; color:#2a6a2a; border:1px solid #1a3a1a;
+    }
+
+    /* ── Execution step trace ── */
+    .feed-steps { margin-top:6px; }
+    .feed-steps-toggle {
+      background:none; border:none; color:var(--text-dim); font-size:11px;
+      cursor:pointer; padding:0; font-family:var(--mono); transition:color .15s;
+    }
+    .feed-steps-toggle:hover { color:var(--text-muted); }
+    .feed-steps-list { margin-top:6px; display:flex; flex-direction:column; gap:3px; }
+    .feed-steps-list.hidden { display:none; }
+    .feed-step { display:flex; gap:8px; align-items:baseline; }
+    .feed-step-n {
+      font-size:10px; color:var(--text-dim); font-family:var(--mono);
+      flex-shrink:0; width:14px; text-align:right;
+    }
+    .feed-step-text { font-size:11px; color:#484848; font-family:var(--mono); line-height:1.5; }
+
+    /* ── Suggestion card ── */
+    .suggest-card {
+      background:var(--bg); border:1px solid var(--border-light); border-radius:8px;
+      padding:12px; display:flex; flex-direction:column; gap:8px;
+    }
+    .suggest-card .action { font-size:12px; color:var(--text); line-height:1.4; }
+    .suggest-card .cond { font-size:11px; color:var(--text-muted); }
+    .suggest-card .btns { display:flex; gap:6px; }
+    .suggest-card .btn-acc {
+      flex:1; padding:5px; border-radius:6px; border:1px solid #1a4020;
+      background:#0a2010; color:var(--green); font-size:11px; cursor:pointer;
+      font-family:var(--font); transition:background .15s;
+    }
+    .suggest-card .btn-acc:hover { background:#0f3020; }
+    .suggest-card .btn-rej {
+      flex:1; padding:5px; border-radius:6px; border:1px solid var(--border);
+      background:none; color:var(--text-muted); font-size:11px; cursor:pointer;
+      font-family:var(--font); transition:all .15s;
+    }
+    .suggest-card .btn-rej:hover { color:var(--red); border-color:#3a1010; }
+
+    /* ── Execution progress ── */
+    .exec-progress {
+      background:var(--surface); border:1px solid var(--border); border-radius:8px;
+      padding:12px; display:flex; flex-direction:column; gap:6px;
+    }
+    .exec-title { font-size:11px; color:var(--text-muted); letter-spacing:0.05em; }
+    .exec-task { font-size:12px; color:var(--text); line-height:1.4; }
+    .exec-steps { display:flex; flex-direction:column; gap:3px; max-height:120px; overflow-y:auto; }
+    .exec-step { font-size:10px; color:var(--text-dim); font-family:var(--mono); }
+    .exec-step.active { color:var(--amber); }
+    .exec-step.done { color:var(--green); }
+    .exec-spinner {
+      display:inline-block; width:8px; height:8px; border-radius:50%;
+      background:var(--amber); animation:pulse 0.8s ease-in-out infinite;
+      flex-shrink:0;
+    }
+
+    /* ── Behaviour model ── */
+    .model-list { display:flex; flex-direction:column; gap:10px; }
+    .workflow-card {
+      background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;
+    }
+    .workflow-header {
+      display:flex; align-items:center; gap:10px; padding:14px 16px; cursor:pointer;
+      transition:background .15s; user-select:none;
+    }
+    .workflow-header:hover { background:var(--surface2); }
+    .workflow-name { flex:1; font-size:13px; color:var(--text); }
+    .workflow-meta { display:flex; align-items:center; gap:8px; }
+    .obs-count { font-size:11px; color:var(--text-muted); }
+    .chevron { font-size:10px; color:var(--text-dim); transition:transform .2s; }
+    .workflow-card.open .chevron { transform:rotate(90deg); }
+
+    .workflow-body { display:none; border-top:1px solid var(--border); padding:12px 16px; }
+    .workflow-card.open .workflow-body { display:block; }
+
+    .workflow-desc {
+      font-size:12px; color:var(--text-muted); margin-bottom:12px; line-height:1.5;
+    }
+    .workflow-desc-edit {
+      width:100%; background:var(--bg); border:1px solid var(--border); border-radius:6px;
+      padding:6px 10px; color:var(--text); font-size:12px; font-family:var(--font);
+      resize:none; outline:none; margin-bottom:8px;
+    }
+    .workflow-desc-edit:focus { border-color:var(--border-light); }
+
+    .rules-list { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
+    .rule-row {
+      background:var(--bg); border:1px solid var(--border); border-radius:6px;
+      padding:10px 12px; display:flex; flex-direction:column; gap:4px;
+    }
+    .rule-cond { font-size:11px; color:var(--text-muted); }
+    .rule-action { font-size:12px; color:var(--text); }
+    .rule-footer { display:flex; align-items:center; gap:8px; margin-top:4px; }
+    .rule-obs { font-size:10px; color:var(--text-dim); }
+    .rule-actions-row { margin-left:auto; display:flex; gap:4px; }
+
+    .workflow-footer-btns { display:flex; gap:6px; }
+    .btn-ghost {
+      padding:5px 12px; border-radius:6px; border:1px solid var(--border);
+      background:none; color:var(--text-muted); font-size:11px; cursor:pointer;
+      font-family:var(--font); transition:all .15s;
+    }
+    .btn-ghost:hover { color:var(--text); border-color:var(--border-light); }
+    .btn-ghost.danger:hover { color:var(--red); border-color:#3a1010; }
+    .btn-ghost.pin-active { color:var(--amber); border-color:#3a2900; }
+
+    .model-empty { text-align:center; color:var(--text-dim); padding:60px 0; font-size:13px; }
+
+    /* ── Settings ── */
+    .settings-grid { display:flex; flex-direction:column; gap:24px; max-width:560px; }
+    .setting-group { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+    .setting-group-title {
+      padding:12px 16px; border-bottom:1px solid var(--border);
+      font-size:11px; color:var(--text-muted); letter-spacing:0.08em; text-transform:uppercase;
+    }
+    .setting-row {
+      padding:14px 16px; display:flex; align-items:center; gap:12px;
+      border-bottom:1px solid var(--border);
+    }
+    .setting-row:last-child { border-bottom:none; }
+    .setting-label { flex:1; }
+    .setting-label-title { font-size:13px; color:var(--text); }
+    .setting-label-desc { font-size:11px; color:var(--text-muted); margin-top:2px; }
+    .setting-control { flex-shrink:0; }
+
+    .input-field {
+      background:var(--bg); border:1px solid var(--border); border-radius:6px;
+      padding:7px 10px; color:var(--text); font-size:12px; font-family:var(--mono);
+      outline:none; width:220px; transition:border-color .15s;
+    }
+    .input-field:focus { border-color:var(--border-light); }
+    .input-field::placeholder { color:var(--text-dim); }
+
+    .input-wide { width:100%; }
+
+    .select-field {
+      background:var(--bg); border:1px solid var(--border); border-radius:6px;
+      padding:7px 10px; color:var(--text); font-size:12px; font-family:var(--font);
+      outline:none; cursor:pointer; appearance:none;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23555'/%3E%3C/svg%3E");
+      background-repeat:no-repeat; background-position:right 10px center; padding-right:28px;
+    }
+
+    .conn-status { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-muted); }
+
+    .btn-primary {
+      padding:7px 16px; border-radius:6px; border:none;
+      background:#1a3a20; color:var(--green); font-size:12px; cursor:pointer;
+      font-family:var(--font); transition:background .15s;
+    }
+    .btn-primary:hover { background:#1f4a28; }
+
+    .btn-danger {
+      padding:7px 16px; border-radius:6px; border:1px solid #3a1010;
+      background:none; color:var(--red); font-size:12px; cursor:pointer;
+      font-family:var(--font); transition:background .15s;
+    }
+    .btn-danger:hover { background:#1a0808; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width:4px; }
+    ::-webkit-scrollbar-track { background:transparent; }
+    ::-webkit-scrollbar-thumb { background:var(--border); border-radius:4px; }
+    ::-webkit-scrollbar-thumb:hover { background:var(--border-light); }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Titlebar ─────────────────────────────────────────────────────── -->
+  <div class="titlebar">
+    <nav class="nav">
+      <button class="nav-btn active" data-view="feed">Activity</button>
+      <button class="nav-btn" data-view="model">Behaviour</button>
+      <button class="nav-btn" data-view="settings">Settings</button>
+    </nav>
+    <div class="titlebar-right">
+      <div class="status-pill" id="sp-pill">
+        <div class="dot pulse" id="sp-dot"></div>
+        <span class="pill-label" id="sp-label">Screenpipe…</span>
+      </div>
+      <div class="status-pill" id="or-pill">
+        <div class="dot pulse" id="or-dot"></div>
+        <span class="pill-label" id="or-label">OpenRouter…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Activity feed view ────────────────────────────────────────────── -->
+  <div class="view active" id="view-feed">
+    <div class="main-layout">
+      <div class="feed-area" id="feed-area">
+
+        <!-- Demo banner — only shown when demo data is present and no real data yet -->
+        <div id="demo-banner" style="display:none;margin-bottom:16px;padding:12px 14px;
+            background:#0e1a0e;border:1px solid #1a3a1a;border-radius:8px;
+            display:none;flex-direction:column;gap:6px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:10px;font-weight:600;letter-spacing:0.1em;color:#22c55e;
+                padding:2px 7px;background:#0a2010;border:1px solid #1a4020;border-radius:10px;">
+              DEMO
+            </span>
+            <span style="font-size:12px;color:#a0a0a0;">These are sample items — not real actions taken on your computer.</span>
+          </div>
+          <div style="font-size:11px;color:#505050;">
+            The items below show what Ghostwork's activity feed looks like.
+            Click <strong style="color:#888">▶ Run live demo</strong> in the sidebar to see it take an actual action right now.
+          </div>
+        </div>
+
+        <div class="section-title">Today's activity</div>
+        <div class="feed" id="feed-list">
+          <div class="feed-empty">Ghostwork is observing. Activity will appear here.</div>
+        </div>
+      </div>
+      <div class="sidebar">
+        <div class="sidebar-header">Suggestions</div>
+
+        <!-- Demo action launcher — only shown alongside demo data -->
+        <div id="demo-run-panel" style="display:none;padding:12px;border-bottom:1px solid var(--border);">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;line-height:1.5;">
+            Watch Ghostwork take a real action on your screen right now:
+          </div>
+          <button id="btn-demo-run" onclick="runDemoAction()" style="
+              width:100%;padding:8px;border-radius:7px;border:1px solid #1a3a1a;
+              background:#0a2010;color:#22c55e;font-size:12px;cursor:pointer;
+              font-family:var(--font);display:flex;align-items:center;justify-content:center;gap:6px;
+              transition:background .15s;">
+            ▶ Run live demo
+          </button>
+          <div id="demo-run-steps" style="display:none;margin-top:10px;"></div>
+        </div>
+
+        <div class="sidebar-content" id="sidebar-suggestions">
+          <div class="sidebar-empty">No pending suggestions</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Behaviour model view ──────────────────────────────────────────── -->
+  <div class="view" id="view-model">
+    <div class="scroll">
+      <div class="section-title">Learned workflows</div>
+      <div id="model-list" class="model-list">
+        <div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Settings view ─────────────────────────────────────────────────── -->
+  <div class="view" id="view-settings">
+    <div class="scroll">
+      <div class="section-title">Settings</div>
+      <div class="settings-grid">
+
+        <!-- Connections -->
+        <div class="setting-group">
+          <div class="setting-group-title">Connections</div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Screenpipe</div>
+              <div class="setting-label-desc">Managed automatically — started via <code style="font-family:var(--mono);font-size:10px;color:var(--text-muted)">npx screenpipe record</code></div>
+            </div>
+            <div class="setting-control">
+              <div class="conn-status" id="settings-sp-status">
+                <div class="dot pulse" id="settings-sp-dot"></div>
+                <span id="settings-sp-text">Starting…</span>
+              </div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">OpenRouter API Key</div>
+              <div class="setting-label-desc">Used for pattern extraction via Claude Sonnet</div>
+            </div>
+            <div class="setting-control">
+              <input type="password" class="input-field" id="or-key-input" placeholder="sk-or-…" />
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Test connection</div>
+              <div class="setting-label-desc" id="or-test-result">Send a test prompt to verify API key</div>
+            </div>
+            <div class="setting-control">
+              <button class="btn-primary" id="btn-test-or">Test</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Observation -->
+        <div class="setting-group">
+          <div class="setting-group-title">Observation</div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Excluded apps</div>
+              <div class="setting-label-desc">Comma-separated. These are never observed or sent to OpenRouter.</div>
+            </div>
+          </div>
+          <div class="setting-row">
+            <input type="text" class="input-field input-wide" id="excluded-apps-input"
+              placeholder="1Password, banking app, personal mail…" />
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Autonomy level</div>
+              <div class="setting-label-desc">Caps what Ghostwork can do regardless of confidence</div>
+            </div>
+            <div class="setting-control">
+              <select class="select-field" id="autonomy-select">
+                <option value="suggest">Suggest only</option>
+                <option value="supervised">Supervised (act + notify)</option>
+                <option value="full">Full autonomous</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Data -->
+        <div class="setting-group">
+          <div class="setting-group-title">Data &amp; Privacy</div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Export behaviour model</div>
+              <div class="setting-label-desc">Download everything Ghostwork has learned as JSON</div>
+            </div>
+            <div class="setting-control">
+              <button class="btn-primary" id="btn-export">Export</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-label">
+              <div class="setting-label-title">Wipe behaviour model</div>
+              <div class="setting-label-desc">Delete all workflows, rules, and activity history</div>
+            </div>
+            <div class="setting-control">
+              <button class="btn-danger" id="btn-wipe">Wipe all data</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const api = window.ghostwork;
+
+// ── Confidence helpers ──────────────────────────────────────────────────────
+function confTier(c) {
+  if (c > 0.85) return 'autonomous';
+  if (c >= 0.6) return 'confident';
+  return 'learning';
+}
+function confLabel(c) {
+  const t = confTier(c);
+  if (t === 'autonomous') return 'Autonomous';
+  if (t === 'confident')  return 'Confident';
+  return 'Learning';
+}
+function confClass(c) {
+  const t = confTier(c);
+  if (t === 'autonomous') return 'conf-autonomous';
+  if (t === 'confident')  return 'conf-confident';
+  return 'conf-learning';
+}
+function esc(s) {
+  return String(s||'')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+function fmtTime(ts) {
+  try { return new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}); }
+  catch { return '--:--'; }
+}
+
+// ── Navigation ──────────────────────────────────────────────────────────────
+document.querySelectorAll('.nav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const view = btn.dataset.view;
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('view-' + view).classList.add('active');
+    if (view === 'model') loadModel();
+    if (view === 'settings') loadSettings();
+  });
+});
+
+// ── Status pills ────────────────────────────────────────────────────────────
+async function checkConnections() {
+  // Screenpipe
+  try {
+    const h = await api.screenpipe.health();
+    const dot = document.getElementById('sp-dot');
+    const lbl = document.getElementById('sp-label');
+    const sdot = document.getElementById('settings-sp-dot');
+    const stxt = document.getElementById('settings-sp-text');
+    if (h.status === 'ok') {
+      dot.className = 'dot ok'; lbl.textContent = 'Screenpipe';
+      sdot.className = 'dot ok'; stxt.textContent = 'Connected';
+    } else {
+      dot.className = 'dot err'; lbl.textContent = 'Screenpipe offline';
+      sdot.className = 'dot err'; stxt.textContent = 'Offline — start Screenpipe';
+    }
+  } catch { /* ignore */ }
+
+  // OpenRouter — just check key presence, never auto-fire a live call
+  try {
+    const { hasKey } = await api.openrouter.status();
+    const dot = document.getElementById('or-dot');
+    const lbl = document.getElementById('or-label');
+    dot.className = hasKey ? 'dot ok' : 'dot warn';
+    lbl.textContent = hasKey ? 'OpenRouter' : 'No API key';
+  } catch {
+    document.getElementById('or-dot').className = 'dot err';
+    document.getElementById('or-label').textContent = 'OpenRouter error';
+  }
+}
+
+// ── Activity feed ───────────────────────────────────────────────────────────
+let feedItems = [];
+
+async function loadFeed() {
+  try {
+    feedItems = await api.db.activityLog(100);
+    const isDemo = await api.settings.get('demo_seeded', '').then(v => v === '1');
+    const hasRealData = await api.settings.get('first_extraction_done', '').then(v => v === '1');
+    const showDemo = isDemo && !hasRealData;
+
+    const banner = document.getElementById('demo-banner');
+    const runPanel = document.getElementById('demo-run-panel');
+    if (banner) banner.style.display = showDemo ? 'flex' : 'none';
+    if (runPanel) runPanel.style.display = showDemo ? 'block' : 'none';
+
+    renderFeed();
+  } catch(e) { console.error('feed load error', e); }
+}
+
+function renderFeed() {
+  const list = document.getElementById('feed-list');
+  if (!feedItems || feedItems.length === 0) {
+    list.innerHTML = '<div class="feed-empty">Ghostwork is observing. Activity will appear here.</div>';
+    return;
+  }
+  list.innerHTML = feedItems.map(item => {
+    const tier = item.tier;
+    const status = item.status;
+    const showAcceptReject = status === 'pending' && tier === 'suggest';
+    const showUndo = status === 'pending' && tier === 'supervised';
+
+    const statusLabel = {
+      pending:  tier === 'suggest' ? 'waiting' : 'done — undo?',
+      accepted: 'accepted',
+      rejected: 'rejected',
+      undone:   'undone',
+      silent:   'auto',
+    }[status] || status;
+
+    const statusCls = { accepted:'accepted', rejected:'rejected', undone:'undone', silent:'silent' }[status] || '';
+
+    // Parse execution steps stored in user_note (format: {demo:bool, steps:[]})
+    let steps = [];
+    let isDemo = false;
+    if (item.user_note) {
+      try {
+        const parsed = JSON.parse(item.user_note);
+        if (Array.isArray(parsed)) {
+          steps = parsed; // legacy plain array
+        } else {
+          steps = parsed.steps || [];
+          isDemo = !!parsed.demo;
+        }
+      } catch {}
+    }
+    const demoBadgeHtml = isDemo
+      ? `<span class="demo-chip">DEMO</span>`
+      : '';
+    const stepsHtml = steps.length ? `
+      <div class="feed-steps" id="steps-${item.id}">
+        <button class="feed-steps-toggle" onclick="toggleSteps(${item.id})">
+          ▸ ${steps.length} steps
+        </button>
+        <div class="feed-steps-list hidden" id="steps-list-${item.id}">
+          ${steps.map((s, i) => `
+            <div class="feed-step">
+              <span class="feed-step-n">${i + 1}</span>
+              <span class="feed-step-text">${esc(s)}</span>
+            </div>`).join('')}
+        </div>
+      </div>` : '';
+
+    return `
+      <div class="feed-item" data-id="${item.id}">
+        <span class="feed-ts">${fmtTime(item.timestamp)}</span>
+        <div class="feed-body">
+          ${item.workflow_name ? `<div class="feed-workflow">${esc(item.workflow_name)}</div>` : ''}
+          <div class="feed-action">${esc(item.action_taken)}</div>
+          <div class="feed-meta">
+            <span class="confidence-badge ${confClass(item.confidence)}">${confLabel(item.confidence)}</span>
+            <span class="status-badge ${statusCls}">${statusLabel}</span>
+            ${demoBadgeHtml}
+          </div>
+          ${stepsHtml}
+          ${showAcceptReject ? `
+            <div class="feed-actions">
+              <button class="btn-sm accept" onclick="feedAccept(${item.id}, ${item.rule_id || 'null'})">Do it</button>
+              <button class="btn-sm reject" onclick="feedReject(${item.id}, ${item.rule_id || 'null'})">Dismiss</button>
+            </div>` : ''}
+          ${showUndo ? `
+            <div class="feed-actions">
+              <button class="btn-sm reject" onclick="feedUndo(${item.id})">Undo</button>
+            </div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function toggleSteps(id) {
+  const list = document.getElementById('steps-list-' + id);
+  const btn = document.querySelector('#steps-' + id + ' .feed-steps-toggle');
+  if (!list || !btn) return;
+  const open = !list.classList.contains('hidden');
+  list.classList.toggle('hidden', open);
+  // count steps
+  const n = list.querySelectorAll('.feed-step').length;
+  btn.textContent = (open ? '▸' : '▾') + ' ' + n + ' steps';
+}
+
+// ── Live demo action ─────────────────────────────────────────────────────────
+let demoRunning = false;
+
+async function runDemoAction() {
+  if (demoRunning) return;
+  demoRunning = true;
+
+  const btn = document.getElementById('btn-demo-run');
+  const stepsBox = document.getElementById('demo-run-steps');
+  if (btn) {
+    btn.textContent = '⏳ Running…';
+    btn.style.opacity = '0.6';
+    btn.style.cursor = 'default';
+  }
+  if (stepsBox) {
+    stepsBox.style.display = 'block';
+    stepsBox.innerHTML = '<div style="font-size:10px;color:var(--text-dim);font-family:var(--mono);">Starting…</div>';
+  }
+
+  const demoSteps = [];
+
+  // Listen for live step events from this execution
+  const stepHandler = (_e, data) => {
+    demoSteps.push(data);
+    if (stepsBox) {
+      stepsBox.innerHTML = demoSteps.map((d, i) => `
+        <div style="display:flex;gap:6px;margin-bottom:3px;">
+          <span style="font-size:9px;color:var(--text-dim);font-family:var(--mono);width:12px;text-align:right;flex-shrink:0;">${i+1}</span>
+          <span style="font-size:10px;color:#555;font-family:var(--mono);line-height:1.5;">${esc(d.actionName + (d.detail ? ' ' + d.detail : ''))}</span>
+        </div>`).join('');
+      stepsBox.scrollTop = stepsBox.scrollHeight;
+    }
+  };
+  api.on('execute:step', stepHandler);
+
+  try {
+    const result = await api.execute.demoRun();
+    if (btn) {
+      btn.textContent = result.success ? '✓ Done — Calculator shows 1379' : '✗ Failed: ' + (result.error || 'unknown');
+      btn.style.color = result.success ? 'var(--green)' : 'var(--red)';
+      btn.style.borderColor = result.success ? '#1a4020' : '#3a1010';
+      btn.style.opacity = '1';
+      btn.style.cursor = 'pointer';
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = '✗ Error'; btn.style.color = 'var(--red)'; btn.style.opacity = '1'; }
+  } finally {
+    api.off('execute:step', stepHandler);
+    demoRunning = false;
+  }
+}
+
+async function feedAccept(id, ruleId) {
+  await api.db.activityStatus(id, 'accepted');
+  if (ruleId) await api.db.acceptRule(ruleId);
+  await loadFeed();
+}
+async function feedReject(id, ruleId) {
+  await api.db.activityStatus(id, 'rejected');
+  if (ruleId) await api.db.correction(ruleId, '', '', 'user rejected');
+  await loadFeed();
+}
+async function feedUndo(id) {
+  await api.db.activityStatus(id, 'undone');
+  await loadFeed();
+}
+
+// ── Suggestions sidebar ──────────────────────────────────────────────────────
+let suggestions = [];
+
+function addSuggestion(data) {
+  suggestions.push(data);
+  renderSuggestions();
+}
+
+function renderSuggestions() {
+  const el = document.getElementById('sidebar-suggestions');
+  if (suggestions.length === 0) {
+    el.innerHTML = '<div class="sidebar-empty">No pending suggestions</div>';
+    return;
+  }
+  el.innerHTML = suggestions.map((s, i) => `
+    <div class="suggest-card" id="suggest-${i}">
+      <div class="cond">${esc(s.condition)}</div>
+      <div class="action">${esc(s.action)}</div>
+      <div class="btns" id="suggest-btns-${i}">
+        <button class="btn-acc" onclick="acceptSuggestion(${i})">Do it</button>
+        <button class="btn-rej" onclick="dismissSuggestion(${i})">Dismiss</button>
+      </div>
+    </div>`).join('');
+}
+
+async function acceptSuggestion(i) {
+  const s = suggestions[i];
+  if (!s) return;
+
+  // Show inline progress in the card
+  const btns = document.getElementById('suggest-btns-' + i);
+  if (btns) {
+    btns.innerHTML = `
+      <div style="display:flex;align-items:center;gap:6px;color:var(--amber);font-size:11px;">
+        <div class="exec-spinner"></div>
+        <span id="suggest-step-${i}">Starting…</span>
+      </div>`;
+  }
+
+  // Fire real execution
+  try {
+    const result = await api.execute.task(s.action, `Triggered from suggestion: ${s.condition}`);
+    await api.db.activityStatus(s.id, result.success ? 'accepted' : 'rejected');
+    if (s.ruleId) {
+      if (result.success) await api.db.acceptRule(s.ruleId);
+      else await api.db.correction(s.ruleId, s.action, '', result.error || 'execution failed');
+    }
+    if (btns) {
+      btns.innerHTML = result.success
+        ? `<div style="font-size:11px;color:var(--green);">✓ Done in ${result.steps} steps</div>`
+        : `<div style="font-size:11px;color:var(--red);">✗ ${esc(result.error || 'Failed')}</div>`;
+    }
+    setTimeout(() => {
+      suggestions.splice(i, 1);
+      renderSuggestions();
+      loadFeed();
+    }, 2000);
+  } catch (err) {
+    if (btns) btns.innerHTML = `<div style="font-size:11px;color:var(--red);">✗ ${esc(String(err))}</div>`;
+  }
+}
+async function dismissSuggestion(i) {
+  const s = suggestions[i];
+  if (!s) return;
+  await api.db.activityStatus(s.id, 'rejected');
+  if (s.ruleId) await api.db.correction(s.ruleId, s.action, '', 'dismissed');
+  suggestions.splice(i, 1);
+  renderSuggestions();
+}
+
+// ── Engine events ────────────────────────────────────────────────────────────
+api.on('engine:suggest', (data) => {
+  addSuggestion(data);
+  loadFeed();
+});
+api.on('engine:supervised', (data) => {
+  loadFeed();
+  if (data.status === 'executing') {
+    showExecutionPanel(data.action);
+  } else {
+    hideExecutionPanel();
+  }
+});
+api.on('engine:activity', () => loadFeed());
+api.on('engine:step', (data) => {
+  updateExecutionPanel(data.step, data.actionName, data.detail);
+});
+api.on('execute:step', (data) => {
+  updateExecutionPanel(data.step, data.actionName, data.detail);
+});
+api.on('model:updated', () => {
+  loadFeed();
+  const modelView = document.getElementById('view-model');
+  if (modelView.classList.contains('active')) loadModel();
+});
+
+// ── Execution progress panel ─────────────────────────────────────────────────
+let execSteps = [];
+
+function showExecutionPanel(task) {
+  execSteps = [];
+  const el = document.getElementById('sidebar-suggestions');
+  const panel = document.createElement('div');
+  panel.id = 'exec-panel';
+  panel.className = 'exec-progress';
+  panel.innerHTML = `
+    <div class="exec-title" style="display:flex;align-items:center;gap:6px;">
+      <div class="exec-spinner"></div>
+      <span>Executing</span>
+    </div>
+    <div class="exec-task">${esc(task)}</div>
+    <div class="exec-steps" id="exec-steps-list"></div>`;
+  el.prepend(panel);
+}
+
+function updateExecutionPanel(step, actionName, detail) {
+  const list = document.getElementById('exec-steps-list');
+  if (!list) return;
+  const prev = list.querySelector('.exec-step.active');
+  if (prev) prev.classList.replace('active', 'done');
+  const row = document.createElement('div');
+  row.className = 'exec-step active';
+  row.textContent = `${step}. ${actionName}${detail ? ' ' + detail : ''}`;
+  list.appendChild(row);
+  list.scrollTop = list.scrollHeight;
+}
+
+function hideExecutionPanel() {
+  const panel = document.getElementById('exec-panel');
+  if (!panel) return;
+  // Mark last step done
+  const last = panel.querySelector('.exec-step.active');
+  if (last) last.classList.replace('active', 'done');
+  // Fade out after 3s
+  setTimeout(() => panel.remove(), 3000);
+}
+
+// ── Behaviour model view ─────────────────────────────────────────────────────
+async function loadModel() {
+  const list = document.getElementById('model-list');
+  try {
+    const workflows = await api.db.workflows();
+    if (!workflows || workflows.length === 0) {
+      list.innerHTML = '<div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>';
+      return;
+    }
+
+    const isDemo = await api.settings.get('demo_seeded', '').then(v => v === '1');
+    const hasRealData = await api.settings.get('first_extraction_done', '').then(v => v === '1');
+    const showDemoChips = isDemo && !hasRealData;
+
+    // Load rules for each workflow
+    const withRules = await Promise.all(
+      workflows.map(async wf => ({
+        ...wf,
+        rules: await api.db.rulesForWorkflow(wf.id)
+      }))
+    );
+
+    list.innerHTML = (showDemoChips ? `
+      <div style="padding:10px 14px;margin-bottom:12px;background:#0e1a0e;
+          border:1px solid #1a3a1a;border-radius:8px;
+          font-size:11px;color:#505050;display:flex;align-items:center;gap:8px;">
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.1em;color:#22c55e;
+            padding:2px 7px;background:#0a2010;border:1px solid #1a4020;border-radius:10px;">
+          DEMO
+        </span>
+        This is a sample workflow. Real workflows appear here as Ghostwork observes you.
+      </div>` : '') +
+    withRules.map(wf => `
+      <div class="workflow-card" id="wf-${wf.id}">
+        <div class="workflow-header" onclick="toggleWorkflow(${wf.id})">
+          ${wf.pinned ? '<span style="color:var(--amber);font-size:11px;">📌</span>' : ''}
+          <span class="workflow-name">${esc(wf.name)}</span>
+          <div class="workflow-meta">
+            <span class="confidence-badge ${confClass(wf.confidence)}">${confLabel(wf.confidence)}</span>
+            ${showDemoChips ? '<span class="demo-chip">DEMO</span>' : ''}
+            <span class="obs-count">${wf.observed_count}×</span>
+            <span class="chevron">▶</span>
+          </div>
+        </div>
+        <div class="workflow-body" id="wf-body-${wf.id}">
+          <div class="workflow-desc" id="wf-desc-${wf.id}">${esc(wf.description)}</div>
+          <div class="rules-list" id="wf-rules-${wf.id}">
+            ${wf.rules.map(r => `
+              <div class="rule-row" id="rule-${r.id}">
+                <div class="rule-cond">When: ${esc(r.condition)}</div>
+                <div class="rule-action">→ ${esc(r.action)}</div>
+                <div class="rule-footer">
+                  <span class="confidence-badge ${confClass(r.confidence)}">${confLabel(r.confidence)}</span>
+                  <span class="rule-obs">${r.observed_count}× obs · ${r.correction_count} corrections</span>
+                  <div class="rule-actions-row">
+                    <button class="btn-sm" onclick="editRule(${r.id}, ${esc(JSON.stringify(r.condition))})">Edit</button>
+                    <button class="btn-sm reject" onclick="deleteRule(${r.id}, ${wf.id})">Delete</button>
+                  </div>
+                </div>
+              </div>`).join('') || '<div style="color:var(--text-dim);font-size:12px;">No rules yet</div>'}
+          </div>
+          <div class="workflow-footer-btns">
+            <button class="btn-ghost" onclick="editWorkflowDesc(${wf.id}, ${JSON.stringify(esc(wf.description))})">Edit description</button>
+            <button class="btn-ghost ${wf.pinned ? 'pin-active' : ''}" onclick="togglePin(${wf.id}, ${!wf.pinned})">
+              ${wf.pinned ? 'Unpin' : 'Pin'}
+            </button>
+            <button class="btn-ghost danger" onclick="deleteWorkflow(${wf.id})">Delete workflow</button>
+          </div>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    list.innerHTML = '<div class="model-empty">Error loading model.</div>';
+    console.error('model load error', e);
+  }
+}
+
+function toggleWorkflow(id) {
+  const card = document.getElementById('wf-' + id);
+  card.classList.toggle('open');
+}
+
+async function deleteWorkflow(id) {
+  if (!confirm('Delete this workflow and all its rules?')) return;
+  await api.db.deleteWorkflow(id);
+  loadModel();
+}
+
+async function deleteRule(ruleId, wfId) {
+  await api.db.deleteRule(ruleId);
+  loadModel();
+}
+
+async function togglePin(wfId, pin) {
+  await api.db.pinWorkflow(wfId, pin);
+  loadModel();
+}
+
+function editWorkflowDesc(wfId, currentDesc) {
+  const descEl = document.getElementById('wf-desc-' + wfId);
+  descEl.innerHTML = `
+    <textarea class="workflow-desc-edit" rows="3">${currentDesc}</textarea>
+    <div style="display:flex;gap:6px;">
+      <button class="btn-ghost" onclick="saveWorkflowDesc(${wfId})">Save</button>
+      <button class="btn-ghost" onclick="loadModel()">Cancel</button>
+    </div>`;
+}
+
+async function saveWorkflowDesc(wfId) {
+  const ta = document.querySelector('#wf-desc-' + wfId + ' textarea');
+  if (!ta) return;
+  await api.db.updateWorkflowDesc(wfId, ta.value);
+  loadModel();
+}
+
+function editRule(ruleId, currentCondition) {
+  const row = document.getElementById('rule-' + ruleId);
+  const condEl = row.querySelector('.rule-cond');
+  condEl.innerHTML = `
+    <input type="text" class="input-field" style="width:100%;margin-bottom:4px;"
+      value="${esc(currentCondition)}" id="rule-cond-input-${ruleId}" />
+    <div style="display:flex;gap:6px;">
+      <button class="btn-ghost" onclick="saveRuleCond(${ruleId})">Save</button>
+      <button class="btn-ghost" onclick="loadModel()">Cancel</button>
+    </div>`;
+}
+
+async function saveRuleCond(ruleId) {
+  const input = document.getElementById('rule-cond-input-' + ruleId);
+  if (!input) return;
+  await api.db.updateRuleCondition(ruleId, input.value);
+  loadModel();
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const settings = await api.settings.getAll();
+
+  // API key
+  const keyInput = document.getElementById('or-key-input');
+  keyInput.value = settings['openrouter_api_key'] || '';
+
+  // Excluded apps
+  const exclRaw = settings['excluded_apps'] || '[]';
+  let excl = [];
+  try { excl = JSON.parse(exclRaw); } catch {}
+  document.getElementById('excluded-apps-input').value = excl.join(', ');
+
+  // Autonomy
+  const autonomy = settings['autonomy_override'] || 'full';
+  document.getElementById('autonomy-select').value = autonomy;
+
+  // Screenpipe connection
+  const h = await api.screenpipe.health().catch(() => ({ status: 'error', message: '' }));
+  const sdot = document.getElementById('settings-sp-dot');
+  const stxt = document.getElementById('settings-sp-text');
+  if (h.status === 'ok') { sdot.className = 'dot ok'; stxt.textContent = 'Connected'; }
+  else { sdot.className = 'dot err'; stxt.textContent = 'Offline'; }
+}
+
+// Save API key on blur
+document.getElementById('or-key-input').addEventListener('blur', async () => {
+  const val = document.getElementById('or-key-input').value.trim();
+  await api.settings.set('openrouter_api_key', val);
+  process.env && (process.env.OPENROUTER_API_KEY = val);
+});
+
+// Save excluded apps on blur
+document.getElementById('excluded-apps-input').addEventListener('blur', async () => {
+  const raw = document.getElementById('excluded-apps-input').value;
+  const arr = raw.split(',').map(s => s.trim()).filter(Boolean);
+  await api.settings.set('excluded_apps', JSON.stringify(arr));
+});
+
+// Save autonomy on change
+document.getElementById('autonomy-select').addEventListener('change', async () => {
+  const val = document.getElementById('autonomy-select').value;
+  await api.settings.set('autonomy_override', val);
+});
+
+// Test OpenRouter
+document.getElementById('btn-test-or').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-test-or');
+  const result = document.getElementById('or-test-result');
+  btn.textContent = 'Testing…';
+  btn.disabled = true;
+  try {
+    const ok = await api.openrouter.test();
+    result.textContent = ok ? '✓ Connected to OpenRouter' : '✗ Failed — check API key';
+    result.style.color = ok ? 'var(--green)' : 'var(--red)';
+  } catch(e) {
+    result.textContent = '✗ Error: ' + e;
+    result.style.color = 'var(--red)';
+  }
+  btn.textContent = 'Test';
+  btn.disabled = false;
+});
+
+// Export
+document.getElementById('btn-export').addEventListener('click', async () => {
+  const r = await api.db.export();
+  if (r.saved) alert('Exported to: ' + r.path);
+});
+
+// Wipe
+document.getElementById('btn-wipe').addEventListener('click', async () => {
+  if (!confirm('This will permanently delete all learned workflows, rules, and activity history. Continue?')) return;
+  await api.db.wipe();
+  await loadFeed();
+  alert('Behaviour model wiped.');
+});
+
+// ── Screenpipe manager events ────────────────────────────────────────────────
+api.on('screenpipe-mgr:status', (data) => {
+  const dot = document.getElementById('sp-dot');
+  const lbl = document.getElementById('sp-label');
+  const sdot = document.getElementById('settings-sp-dot');
+  const stxt = document.getElementById('settings-sp-text');
+
+  if (data.running) {
+    dot.className = 'dot ok';
+    lbl.textContent = 'Screenpipe';
+    sdot.className = 'dot ok';
+    stxt.textContent = 'Running';
+  } else {
+    const isStarting = data.message && (
+      data.message.includes('Starting') || data.message.includes('restarting')
+    );
+    dot.className = isStarting ? 'dot warn pulse' : 'dot err';
+    lbl.textContent = isStarting ? 'Starting…' : 'Screenpipe offline';
+    sdot.className = isStarting ? 'dot warn pulse' : 'dot err';
+    stxt.textContent = data.message || 'Offline';
+  }
+});
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+loadFeed();
+checkConnections();
+setInterval(loadFeed, 15000);          // refresh feed every 15s
+setInterval(checkConnections, 30000);  // re-check connections every 30s
+</script>
+</body>
+</html>

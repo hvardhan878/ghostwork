@@ -1,0 +1,31 @@
+{
+  "name": "ghostwork",
+  "version": "1.0.0",
+  "description": "A background agent that learns and automates your workflows",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "tsc --project tsconfig.json && cp src/renderer/index.html dist/renderer/index.html",
+    "rebuild-native": "electron-rebuild -f -w better-sqlite3",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --inspect",
+    "postinstall": "electron-rebuild -f -w better-sqlite3"
+  },
+  "keywords": [],
+  "author": "Harsh Vardhan",
+  "license": "SEE LICENSE IN LICENSE",
+  "devDependencies": {
+    "@electron/rebuild": "^3.7.2",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.29",
+    "@types/node-cron": "^3.0.11",
+    "electron": "^36.3.1",
+    "electron-builder": "^25.1.8",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.5.0",
+    "node-cron": "^3.0.3"
+  }
+}
