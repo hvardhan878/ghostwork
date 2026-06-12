@@ -119,10 +119,22 @@ export async function searchContent(
 
   const url = `${SCREENPIPE_BASE}/search?${query.toString()}`;
 
-  const res = await fetch(url, {
+  let res = await fetch(url, {
     headers: authHeaders(),
     signal: AbortSignal.timeout(10000),
   });
+
+  // Auth token injection is async at boot — retry once after a short wait
+  // if we get 401/403 so the race between ensureRunning() and the first
+  // extraction job doesn't permanently fail the boot extraction.
+  if (res.status === 401 || res.status === 403) {
+    await new Promise<void>((r) => setTimeout(r, 5000));
+    res = await fetch(url, {
+      headers: authHeaders(),
+      signal: AbortSignal.timeout(10000),
+    });
+  }
+
   if (!res.ok) {
     throw new Error(`Screenpipe search failed: HTTP ${res.status}`);
   }

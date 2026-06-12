@@ -281,6 +281,20 @@ export interface Rule {
   action_steps: string;
 }
 
+/**
+ * Jaccard-style token overlap between two strings.
+ * Returns 0–1 where 1 is identical. Tokens are lowercased words.
+ */
+function tokenOverlap(a: string, b: string): number {
+  const tok = (s: string) => new Set(s.toLowerCase().match(/\w+/g) ?? []);
+  const setA = tok(a);
+  const setB = tok(b);
+  if (setA.size === 0 && setB.size === 0) return 1;
+  let inter = 0;
+  for (const t of setA) if (setB.has(t)) inter++;
+  return inter / (setA.size + setB.size - inter);
+}
+
 export function upsertRule(
   workflowId: number,
   condition: string,
@@ -291,9 +305,29 @@ export function upsertRule(
   const db = getDb();
   const stepsJson = JSON.stringify(actionSteps);
 
-  const existing = db.prepare(`
+  // 1. Exact match first.
+  let existing = db.prepare(`
     SELECT * FROM rules WHERE workflow_id = ? AND condition = ? AND action = ?
   `).get(workflowId, condition, action) as Rule | undefined;
+
+  // 2. Fuzzy match: if another rule in the same workflow has ≥ 0.7 token
+  //    overlap on BOTH condition and action, treat it as the same rule.
+  //    This prevents duplicate rows when the LLM rephrases slightly.
+  if (!existing) {
+    const siblings = db.prepare(
+      "SELECT * FROM rules WHERE workflow_id = ?"
+    ).all(workflowId) as Rule[];
+
+    for (const r of siblings) {
+      if (
+        tokenOverlap(r.condition, condition) >= 0.7 &&
+        tokenOverlap(r.action, action) >= 0.7
+      ) {
+        existing = r;
+        break;
+      }
+    }
+  }
 
   if (existing) {
     const newCount = existing.observed_count + 1;
@@ -301,7 +335,6 @@ export function upsertRule(
       1.0,
       existing.confidence + (confidence - existing.confidence) * 0.3
     );
-    // Only overwrite steps if the new extraction actually produced some.
     const steps = actionSteps.length > 0 ? stepsJson : existing.action_steps;
     db.prepare(`
       UPDATE rules SET confidence = ?, observed_count = ?, action_steps = ? WHERE id = ?
@@ -826,4 +859,54 @@ export function pruneStaleRules(): number {
       AND observed_count = 0
   `).run();
   return result.changes;
+}
+
+/**
+ * Merge near-duplicate rules (same workflow, ≥ 0.7 token overlap on both
+ * condition and action).  Keeps the row with the highest confidence and
+ * accumulated observed_count; deletes the rest.
+ *
+ * Safe to call at every boot — it's a no-op when no duplicates exist.
+ */
+export function dedupRules(): number {
+  function overlap(a: string, b: string): number {
+    const tok = (s: string) => new Set(s.toLowerCase().match(/\w+/g) ?? []);
+    const sa = tok(a); const sb = tok(b);
+    if (sa.size === 0 && sb.size === 0) return 1;
+    let inter = 0; for (const t of sa) if (sb.has(t)) inter++;
+    return inter / (sa.size + sb.size - inter);
+  }
+
+  const db = getDb();
+  const rules = db.prepare("SELECT * FROM rules ORDER BY workflow_id, id").all() as Rule[];
+  const toDelete = new Set<number>();
+  let merged = 0;
+
+  for (let i = 0; i < rules.length; i++) {
+    if (toDelete.has(rules[i].id)) continue;
+    for (let j = i + 1; j < rules.length; j++) {
+      if (toDelete.has(rules[j].id)) continue;
+      if (rules[i].workflow_id !== rules[j].workflow_id) continue;
+      if (
+        overlap(rules[i].condition, rules[j].condition) >= 0.7 &&
+        overlap(rules[i].action,    rules[j].action)    >= 0.7
+      ) {
+        // Keep the one with higher confidence (i), accumulate observed_count.
+        const winner = rules[i].confidence >= rules[j].confidence ? rules[i] : rules[j];
+        const loser  = winner === rules[i] ? rules[j] : rules[i];
+        db.prepare(
+          "UPDATE rules SET observed_count = observed_count + ?, confidence = MAX(confidence, ?) WHERE id = ?"
+        ).run(loser.observed_count, loser.confidence, winner.id);
+        toDelete.add(loser.id);
+        merged++;
+      }
+    }
+  }
+
+  if (toDelete.size > 0) {
+    const ids = [...toDelete].join(",");
+    db.exec(`DELETE FROM rules WHERE id IN (${ids})`);
+  }
+
+  return merged;
 }

@@ -122,8 +122,20 @@ export function parseFocusCategories(raw: string): string[] {
   }
 }
 
+// Well-known domain → category keyword mappings so URL-based activity isn't
+// filtered out just because the OCR text didn't happen to contain the keyword.
+const DOMAIN_CATEGORY_HINTS: Record<string, string[]> = {
+  "linkedin":  ["linkedin", "crm", "outreach"],
+  "gmail":     ["email", "inbox"],
+  "mail":      ["email", "inbox"],
+  "salesforce":["crm", "reporting"],
+  "hubspot":   ["crm"],
+  "notion":    ["reporting"],
+  "airtable":  ["reporting", "crm"],
+  "slack":     ["email", "inbox"],
+};
+
 function focusCategoryKeywords(categories: string[]): string[] {
-  // Flatten category labels into individual matchable words/phrases.
   return categories.flatMap((cat) =>
     cat.toLowerCase().split(/[\s&,]+/).filter((w) => w.length > 2)
   );
@@ -132,12 +144,25 @@ function focusCategoryKeywords(categories: string[]): string[] {
 function filterByFocusCategories(items: ContentItem[], categories: string[]): ContentItem[] {
   const keywords = focusCategoryKeywords(categories);
   if (keywords.length === 0) return items;
+
   return items.filter((item) => {
-    const haystack = [item.app_name, item.window_name, item.text?.slice(0, 300)]
+    const haystack = [item.app_name, item.window_name, item.text?.slice(0, 500)]
       .filter(Boolean)
       .join(" ")
       .toLowerCase();
-    return keywords.some((kw) => haystack.includes(kw));
+
+    if (keywords.some((kw) => haystack.includes(kw))) return true;
+
+    // Domain-hint fallback: if the window title contains a known service name
+    // and that service maps to one of our focus categories, keep the item.
+    const windowLower = (item.window_name ?? "").toLowerCase();
+    for (const [domain, hints] of Object.entries(DOMAIN_CATEGORY_HINTS)) {
+      if (windowLower.includes(domain) && hints.some((h) => keywords.includes(h))) {
+        return true;
+      }
+    }
+
+    return false;
   });
 }
 
@@ -156,14 +181,19 @@ export async function runExtractionJob(): Promise<void> {
 
   let items: ContentItem[];
   try {
-    items = await getRecentActivity(1, excludedApps, 80);
+    items = await getRecentActivity(2, excludedApps, 100);
+    // If the last 2 hours are empty (user was idle), look back further so a
+    // single active session earlier in the day still gets analysed.
+    if (items.length === 0) {
+      items = await getRecentActivity(6, excludedApps, 100);
+    }
   } catch (err) {
     console.warn("[extractor] Could not fetch screenpipe data:", err);
     return;
   }
 
   if (items.length === 0) {
-    console.log("[extractor] No activity data in last hour — skipping.");
+    console.log("[extractor] No activity data in last 6 hours — skipping.");
     return;
   }
 

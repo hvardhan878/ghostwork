@@ -44,6 +44,7 @@ import {
   wipeModel,
   setRuleConfidenceZero,
   getDiagnostics,
+  dedupRules,
 } from "./db";
 import { runExtractionJob } from "./extractor";
 import { runNightlyConsolidation } from "./consolidation";
@@ -84,6 +85,8 @@ let correctionAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
 function logDbState(): void {
   try {
+    const merged = dedupRules();
+    if (merged > 0) console.log(`[db] Deduped ${merged} near-duplicate rule(s) at startup.`);
     const { rules, settings, activityCount } = getDiagnostics();
     console.log(`\n[db] ── Startup state ──────────────────────────────────`);
     console.log(`[db] Rules: ${rules.length}  |  Activity log entries: ${activityCount}`);
