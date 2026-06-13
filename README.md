@@ -1,5 +1,7 @@
 # Ghostwork
 
+[![Discord](https://img.shields.io/discord/1515405522122178620?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/HxhDfs4H39)
+
 > **The first agent you don't prompt.**
 
 Ghostwork runs silently in the background, learns how you work from observation alone, and gradually takes repetitive tasks off your hands — without you ever writing a prompt or setting up an integration.
