@@ -34,15 +34,14 @@ The living `behaviour.md` profile is injected into every LLM prompt, so the trig
 
 ---
 
-## Execution tiers
+## Autonomy tiers
 
 Ghostwork earns autonomy, never assumes it:
 
-| Tier | Behaviour |
-|------|-----------|
-| **Suggest** | Nudge popup — you decide |
-| **Supervised** | Executes but shows each step |
-| **Autonomous** | Runs silently; you see a receipt |
+| Tier | Triggered when | Behaviour |
+|------|---------------|-----------|
+| **Supervised** | Default for all new rules | Executes immediately, shows HUD notification, Cmd+Z available |
+| **Autonomous** | ≥5 accepts and <2 rejections in last 10 | Runs silently; logged to Activity feed |
 
 Actions that are externally visible (send email, submit form, post) always require one-tap approval regardless of tier.
 
@@ -50,22 +49,21 @@ Actions that are externally visible (send email, submit form, post) always requi
 
 ## Execution stack
 
-1. **Compiled skill replay** — zero-token deterministic replay using ranked DOM/AX locators  
-2. **CDP plan-then-execute** — Playwright CDP on a dedicated Chrome profile; LLM plans steps from live AX tree  
-3. **Native AX control** — AppleScript + `AXUIElement` for non-browser apps  
-4. **Pixel fallback** — Vision + function calling via OpenRouter when no structured tree is available
+1. **Compiled skill replay** — zero-token deterministic replay of recorded step sequences
+2. **AX-first native control** — `ax_list_elements` + `ax_click_element` via macOS Accessibility API; ~95% accuracy on native apps
+3. **Claude vision fallback** — pixel-level screenshots + function calling for browsers and AX-empty apps
 
-Self-healing: when a locator breaks, Ghostwork re-extracts from the live DOM and promotes the new locator automatically.
+When a multi-step sequence fails mid-way, Ghostwork fires Cmd+Z for each completed reversible step in reverse order before surfacing the error.
 
 ---
 
 ## UI
 
-- **Menu bar icon** — reflects current state: observing / noticed / working / recording  
-- **Activity feed** — chronological log of every suggestion and action  
+- **Menu bar icon** — reflects current state: observing / working  
+- **Activity feed** — chronological log of every action taken and approval waiting  
 - **Timeline tab** — drill down into every recorded session; save any session as a skill  
-- **Behaviour tab** — learned workflows, high-confidence rules, and session-derived patterns  
-- **Nudge popup** — appears above any app; shows evidence count and step preview before you confirm
+- **Behaviour tab** — learned rules with autonomy progress, category badges, and one-click boost  
+- **Approvals** — staged actions waiting for your confirmation before executing externally visible steps
 
 ---
 
@@ -113,26 +111,29 @@ npm run dist       # package as .dmg
 ## Architecture
 
 ```
-Screenpipe ──► sessionIngester ──► raw_events ──► NREM ──► rules ──► REM ──► skills
-                                                    ↓                  ↓
-                                              behaviour.md      skill replay
-                                                    ↓
-                              actionEngine ──► trigger decision ──► nudge / execute
+Screenpipe ──► sessionIngester (2min) ──► raw_events ──► extractor (30min) ──► rules
+                                                                                   │
+                                                                          NREM/REM nightly
+                                                                                   │
+                                                                              compiled skills
+                                                                                   │
+                              actionEngine (10s) ──► LLM trigger ──► AX-first executor
+                                                                    └──► vision fallback
 ```
 
 Key files:
 
 | File | Responsibility |
 |------|----------------|
-| `sessionIngester.ts` | Polls Screenpipe input stream every 2 min; stitches events into sessions |
-| `consolidation.ts` | Nightly NREM/REM/GC cycle |
-| `behaviourProfile.ts` | Writes `behaviour.md`; read by all LLM prompts |
-| `browserDriver.ts` | CDP connection to dedicated Chrome profile; ranked locators |
-| `skillEngine.ts` | Compile (plan-then-execute) and replay (deterministic) |
-| `axDriver.ts` | macOS native app control via AXUIElement |
-| `actionEngine.ts` | Perception loop + LLM trigger decision |
-| `extractor.ts` | Hourly Screenpipe OCR extraction fallback |
-| `db.ts` | SQLite schema: workflows, rules, skills, sessions, raw_events |
+| `sessionIngester.ts` | 2 min poll → raw_events + per-event prediction scoring |
+| `extractor.ts` | 30 min batch → 7-category structured rule extraction |
+| `consolidation.ts` | Nightly NREM (sessions→rules) + REM (rules→skills) + GC |
+| `actionEngine.ts` | 10 s perception loop + LLM trigger decision + dispatch |
+| `computerUse.ts` | AX-first executor + Claude vision fallback |
+| `axDriver.ts` | macOS accessibility tree (AXUIElement via AppleScript) |
+| `skillEngine.ts` | Browser skill replay with multi-step rollback |
+| `approvals.ts` | Shadow-mode approval queue for externally visible actions |
+| `db.ts` | GhostWork SQLite: rules, episodes, skills, approvals, settings |
 
 ---
 
@@ -140,7 +141,7 @@ Key files:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and coding guidelines.
 
-Open issues on GitHub — look for `good first issue` labels.
+Open issues on GitHub — look for `good first issue` labels. Join the [Discord](https://discord.gg/HxhDfs4H39) to discuss ideas or get help getting set up.
 
 ---
 

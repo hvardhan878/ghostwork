@@ -1,8 +1,8 @@
 # Contributing to Ghostwork
 
-Thanks for your interest in Ghostwork. This project aims to be the first agent you don't prompt — it watches how you work, learns recurring workflows, and earns the right to run them in your browser with your permission.
+Thanks for your interest in Ghostwork — the first agent you don't prompt. It watches how you work, learns recurring workflows, and earns the right to run them autonomously.
 
-We're early. The engine works; the product loop is still being proven. **Good first issues are the fastest way to help.**
+We're early. The core loop is working. **Good first issues are the fastest way to help.**
 
 ---
 
@@ -29,17 +29,19 @@ Be respectful, constructive, and honest. Ghostwork handles screen activity — t
 
 ## What we're building
 
-Ghostwork has two learning paths and one execution engine:
+Ghostwork has a single continuous loop:
 
-| Path | How it works |
-|------|----------------|
-| **Ambient learning** | Screenpipe observes your screen → hourly extractor finds workflows/rules → action engine nudges when context matches |
-| **Teach Mode** | Record a demonstration in Chrome → events compile into a deterministic skill |
-| **Execution** | Skill replay (zero tokens) → CDP plan-then-execute → deterministic steps → vision fallback |
+| Phase | What happens |
+|-------|-------------|
+| **Observe** | Screenpipe captures every UI event and OCR frame on your Mac |
+| **Learn** | Every 2 min: events → sessions. Every 30 min: sessions → rules (via LLM). Nightly: rules → compiled skills |
+| **Act** | Every 10 s: current context → LLM checks if any rule applies → executes at earned tier |
+
+**Autonomy tiers** — earned, never assumed:
+- **Supervised** (default) — executes and shows a HUD notification; Cmd+Z undoes it
+- **Autonomous** — runs silently after ≥5 accepted executions with fewer than 2 recent rejections
 
 The north-star moment: *"It noticed I do LinkedIn outreach every Tuesday and handled it while I got coffee."*
-
-Pick up a task from [GitHub Issues labeled `good first issue`](https://github.com/hvardhan878/ghostwork/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
 
 ---
 
@@ -47,47 +49,28 @@ Pick up a task from [GitHub Issues labeled `good first issue`](https://github.co
 
 ### Requirements
 
-- **macOS** (primary target — mouse/keyboard/AX automation is macOS-specific today)
-- **Node.js** 18+
-- **Google Chrome** (for CDP-based browser execution)
-- **OpenRouter API key** ([openrouter.ai/keys](https://openrouter.ai/keys)) — required for learning and trigger decisions
-- **Anthropic API key** (optional) — better quality for pixel-based fallback execution
-
-Optional but recommended for full mouse support:
-
-```bash
-pip3 install pyobjc-framework-Quartz
-# or
-brew install cliclick
-```
+- **macOS 12+** (AX automation is macOS-specific today)
+- **Node.js 20+**
+- **[Screenpipe](https://github.com/mediar-ai/screenpipe)** installed and running
+- **OpenRouter API key** ([openrouter.ai/keys](https://openrouter.ai/keys)) — required for rule extraction and trigger decisions
+- **Anthropic API key** (optional) — used for the AX-first native computer use executor
 
 ### Clone and install
 
 ```bash
 git clone https://github.com/hvardhan878/ghostwork.git
 cd ghostwork
-npm install          # runs electron-rebuild for better-sqlite3
-cp .env.example .env # add your keys
+npm install
+npx @electron/rebuild -f -w better-sqlite3
+cp .env.example .env   # add your keys
 ```
 
 ### macOS permissions
 
-On first run, grant:
+On first run, grant when prompted:
 
-- **Screen Recording** — Screenpipe and screenshots
-- **Accessibility** — mouse, keyboard, and AX tree automation
-
-Ghostwork also launches Screenpipe automatically via `npx screenpipe record`.
-
-### Ghostwork Chrome profile
-
-Browser skills run in a **dedicated Chrome profile** (not your daily browser):
-
-```
-~/Library/Application Support/Ghostwork/ChromeProfile
-```
-
-Sign into sites (e.g. LinkedIn) once in this window. Teach Mode and skill replay use it.
+- **Screen Recording** — required by Screenpipe
+- **Accessibility** — required for AX tree interaction and keyboard automation
 
 ---
 
@@ -95,47 +78,46 @@ Sign into sites (e.g. LinkedIn) once in this window. Teach Mode and skill replay
 
 ```
 src/
-  main/                    Electron main process (Node)
-    main.ts                App lifecycle, tray, IPC, cron jobs
-    actionEngine.ts        10s context poll → LLM trigger → dispatch
-    extractor.ts           Hourly Screenpipe → workflow/rule extraction
-    skillEngine.ts         Skill compile + replay + self-heal
-    browserDriver.ts       CDP attach, DOM snapshot, ranked locators
-    teachMode.ts           Record-once skill compiler
-    computerUse.ts         Execution router + pixel fallback
-    stepRunner.ts          Deterministic steps (URL, keys, AX clicks)
-    db.ts                  SQLite: workflows, rules, skills, approvals
-    approvals.ts           Shadow mode approval queue
-    ...
+  main/                    Electron main process (Node.js)
+    main.ts                App lifecycle, tray, IPC handlers, cron jobs
+    actionEngine.ts        10 s context poll → LLM trigger decision → dispatch
+    sessionIngester.ts     2 min poll → raw_events + per-event prediction scoring
+    extractor.ts           30 min batch → 7-category structured rule extraction
+    consolidation.ts       Nightly NREM (episodes→rules) + REM (rules→skills) + GC
+    computerUse.ts         AX-first executor + Claude vision fallback
+    axDriver.ts            macOS accessibility tree (AXUIElement via AppleScript)
+    skillEngine.ts         Browser skill compile + deterministic replay + rollback
+    approvals.ts           Shadow-mode approval queue (staged actions)
+    context.ts             AppleScript + Screenpipe OCR → current UserContext
+    screenpipeDb.ts        Direct SQLite queries to Screenpipe DB
+    db.ts                  GhostWork SQLite: rules, episodes, skills, approvals
   renderer/
-    index.html             Main UI (activity, behaviour, settings)
-    hud.html               "Ghost is driving" overlay
-    nudge.html             Suggestion popup
+    index.html             Full UI — Activity, Timeline, Behaviour, Settings tabs
 ```
 
-Compiled output goes to `dist/`. **Edit `src/`, not `dist/`.**
+Compiled output goes to `dist/`. **Always edit `src/`, never `dist/`.**
 
 ---
 
 ## Running the app
 
 ```bash
-npm start          # build + launch Electron
-npm run dev        # build + launch with Node inspector
-npm run build      # TypeScript compile only
-npm run rebuild-native   # if better-sqlite3 ABI mismatch after Electron upgrade
+npm start          # TypeScript build + launch Electron
+npm run build      # TypeScript compile only (no launch)
+npm run dist       # Package as .dmg
 ```
 
 Logs appear in the terminal. Key prefixes:
 
 | Prefix | Module |
 |--------|--------|
-| `[engine]` | Action engine (context, nudges) |
-| `[extractor]` | Hourly pattern extraction |
-| `[skill:*]` | Skill replay / compile |
-| `[browser]` | CDP Chrome driver |
-| `[teach]` | Teach Mode recorder |
-| `[computer-use]` | Execution router |
+| `[engine]` | Action engine — context polls, trigger decisions |
+| `[ingester]` | Session ingester — raw event collection |
+| `[extractor]` | Rule extraction from sessions |
+| `[consolidation]` | Nightly NREM/REM/GC cycle |
+| `[computer-use]` | AX-first executor + vision fallback |
+| `[skill]` | Skill replay and rollback |
+| `[approvals]` | Staged action approval queue |
 
 Database location:
 
@@ -150,7 +132,7 @@ Database location:
 
 ### 1. Find an issue
 
-Browse [GitHub Issues labeled `good first issue`](https://github.com/hvardhan878/ghostwork/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+Browse [issues labeled `good first issue`](https://github.com/hvardhan878/ghostwork/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) — these are scoped to single files with clear acceptance criteria.
 
 Comment **"I'd like to work on this"** before starting so we avoid duplicate work.
 
@@ -164,22 +146,23 @@ Use prefixes: `fix/`, `feat/`, `docs/`, `refactor/`.
 
 ### 3. Make your change
 
-- Keep diffs focused — one issue per PR when possible
-- Match existing TypeScript style (`strict`, no unnecessary abstractions)
-- Run `npm run build` before opening a PR
-- Manual test on macOS if you touch execution, IPC, or UI
+- Keep diffs focused — one issue per PR
+- Match existing TypeScript style (`strict` mode, no unnecessary abstractions)
+- Run `npm run build` before opening a PR — it must compile clean
+- If you touch execution, IPC, or UI: manual test on macOS
 
 ### 4. Open a pull request
 
-Fill out the PR description. Include:
+Fill out the PR description with:
 
 - **What** changed and **why**
-- **How you tested** (steps, screenshots for UI)
+- **How you tested** (steps to reproduce + verify)
+- **Screenshots** for any UI changes
 - Link to the issue: `Fixes #123`
 
 ### 5. Review
 
-Maintainers may ask for changes. Once approved, we'll merge.
+Maintainers aim to review within 48 hours. Once approved, we'll merge.
 
 ---
 
@@ -187,35 +170,35 @@ Maintainers may ask for changes. Once approved, we'll merge.
 
 ### TypeScript
 
-- Strict mode is on — no `any` unless unavoidable; prefer narrow types
-- Main process code lives in `src/main/`; no React — vanilla HTML/JS in `renderer/`
+- Strict mode is on — no `any` unless truly unavoidable
+- Main process code in `src/main/`; renderer is vanilla HTML/JS (no React, no build framework)
 - New IPC handlers: add to `main.ts`, expose via `preload.ts`, consume in `index.html`
 
 ### Database
 
-- Schema changes go in `db.ts` `initDb()` with `CREATE TABLE IF NOT EXISTS`
-- Migrations are manual today — document breaking changes in the PR
+- Schema changes go in `db.ts` `initDb()` using `CREATE TABLE IF NOT EXISTS`
+- Additive column migrations use the existing `safeAddColumn(db, table, col, type)` helper
 - Never log or commit user activity data
 
-### Execution / browser
+### Execution
 
-- Prefer **ranked locators** over coordinates or vision
-- Mark externally visible steps (`send`, `post`, `connect`) with `external: true`
+- Prefer AX tree interactions (`axDriver.ts`) over pixel clicks for native apps
+- Mark externally visible steps (send email, post, submit form) with `external: true`
 - Shadow mode must gate outbound actions unless `externalAllowed` is explicitly set
 
 ### UI
 
 - Match existing CSS variables in `index.html` (`--surface`, `--border`, `--text-muted`, etc.)
-- Keep the menu-bar-first UX — don't add dashboard complexity without discussion
+- Keep the menu-bar-first UX — avoid adding dashboard complexity without discussion
 
 ### Commits
 
 Clear, imperative subject lines:
 
 ```
-fix(browser): ensure at least one tab before CDP connect
-feat(ui): show morning digest card on app open
-docs: update README for v2 skill engine
+fix(engine): skip rule check when frontmost app is excluded
+feat(ui): add search filter to Behaviour tab rule cards
+docs: update CONTRIBUTING for current architecture
 ```
 
 ---
@@ -223,32 +206,50 @@ docs: update README for v2 skill engine
 ## Architecture primer
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  OBSERVE                                                     │
-│  Screenpipe → extractor (hourly) → workflows + rules (SQLite) │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│  MATCH                                                       │
-│  actionEngine (10s) → context + LLM → nudge / dispatch       │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│  EXECUTE (computerUse router)                                │
-│  1. skill replay (compiled/taught)                           │
-│  2. CDP plan-then-execute (browserDriver + skillEngine)      │
-│  3. deterministic steps (stepRunner)                         │
-│  4. vision fallback (Anthropic / OpenRouter)                  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Screenpipe — frames · ui_events · audio · clipboard         │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ every 2 min
+┌───────────────────────────▼──────────────────────────────────┐
+│  Session Ingester — groups events into sessions              │
+│  Prediction pass: sliding 5-event window → prediction_error  │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ every 30 min
+┌───────────────────────────▼──────────────────────────────────┐
+│  Extractor — 7-category structured rule extraction           │
+│  High-delta events (prediction_error ≥ 0.7) prioritised      │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ nightly
+┌───────────────────────────▼──────────────────────────────────┐
+│  Consolidation — NREM: stitch sessions → episodes            │
+│                  REM:  rules → compiled skills               │
+│                  GC:   demote poor skills, prune old events  │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ every 10 s
+┌───────────────────────────▼──────────────────────────────────┐
+│  Action Engine — context → LLM trigger → supervised/auto     │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+┌───────────────────────────▼──────────────────────────────────┐
+│  AX-First Executor                                           │
+│  ax_list_elements + ax_click_element for native apps         │
+│  Claude vision fallback for browsers / AX-empty apps         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-**Known gap:** observation watches your main screen; execution runs in Ghostwork Chrome. A Chrome extension to unify these is on the roadmap — see good first issues.
+See [architecture.md](architecture.md) for the full breakdown.
 
 ---
 
 ## Good first issues
 
-Find open starter tasks on GitHub: [issues labeled `good first issue`](https://github.com/hvardhan878/ghostwork/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+These are scoped to a single file with clear acceptance criteria and no backend work required:
+
+- [Show Screenpipe connection status in Settings tab](https://github.com/hvardhan878/ghostwork/issues/14)
+- [Copy button on rule condition and action text](https://github.com/hvardhan878/ghostwork/issues/15)
+- [Show last extraction time in Behaviour tab header](https://github.com/hvardhan878/ghostwork/issues/21)
+
+Browse all: [issues labeled `good first issue`](https://github.com/hvardhan878/ghostwork/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
 
 Comment on an issue before you start work.
 
@@ -256,7 +257,7 @@ Comment on an issue before you start work.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [GNU General Public License v3.0 or later](LICENSE).
+By contributing, you agree that your contributions will be licensed under the [GNU General Public License v3.0](LICENSE).
 
 Ghostwork is GPL — derivative works must remain open source under the same license.
 
@@ -264,4 +265,4 @@ Ghostwork is GPL — derivative works must remain open source under the same lic
 
 ## Questions?
 
-Open a [GitHub Discussion](https://github.com/hvardhan878/ghostwork/discussions) or comment on an issue. For security concerns, please do not open public issues with exploit details — contact the maintainer directly.
+Join the [Discord community](https://discord.gg/HxhDfs4H39) or comment on an issue. For security concerns, do not open public issues with exploit details — contact the maintainer directly.
