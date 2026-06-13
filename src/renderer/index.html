@@ -1584,22 +1584,22 @@ async function runTimelineDebug() {
   const panel = document.getElementById('tl-debug-panel');
   const content = document.getElementById('tl-debug-content');
   panel.style.display = 'block';
-  content.textContent = 'Fetching…';
+  content.textContent = 'Fetching from Screenpipe DB…';
   try {
-    const [inputRes, uiRes] = await Promise.all([
-      api.debug.screenpipeRaw('input'),
-      api.debug.screenpipeRaw('ui'),
-    ]);
+    const res = await api.debug.screenpipeRaw();
+    if (!res.ok) {
+      content.textContent = 'ERROR: ' + res.error;
+      return;
+    }
     const out = [
-      '=== content_type=input ===',
-      inputRes.ok
-        ? JSON.stringify(inputRes.sample, null, 2)
-        : 'ERROR: ' + inputRes.error,
+      `=== UI Events (last 15 min, ${res.events?.length ?? 0} rows) ===`,
+      JSON.stringify(res.events, null, 2),
       '',
-      '=== content_type=ui ===',
-      uiRes.ok
-        ? JSON.stringify(uiRes.sample, null, 2)
-        : 'ERROR: ' + uiRes.error,
+      `=== Audio Transcriptions (last 15 min, ${res.audio?.length ?? 0} rows) ===`,
+      JSON.stringify(res.audio, null, 2),
+      '',
+      `=== Frame Texts (last 15 min, ${res.frames?.length ?? 0} rows) ===`,
+      res.frames?.map(f => `[${f.timestamp.slice(11,19)}] ${f.app_name} — ${f.text?.slice(0,200)}`).join('\n'),
     ].join('\n');
     content.textContent = out;
   } catch(e) {
@@ -1618,36 +1618,46 @@ function fmtDate(ts) {
 async function loadTimeline() {
   const list = document.getElementById('timeline-list');
   if (!list) return;
-  list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading…</div>';
+  list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading from Screenpipe…</div>';
   try {
     const sessions = await api.timeline.sessions(7);
     if (!sessions || sessions.length === 0) {
-      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:20px 0;">No sessions recorded yet.<br>Ghostwork will start capturing your interactions automatically.</div>';
+      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:20px 0;">No sessions recorded yet.<br>Screenpipe will start capturing your interactions automatically.</div>';
       return;
     }
     list.innerHTML = '';
     for (const s of sessions) {
-      const apps = (() => { try { return JSON.parse(s.apps); } catch { return [s.app || '?']; } })();
-      const appStr = apps.slice(0, 4).join(', ') + (apps.length > 4 ? ` +${apps.length - 4}` : '');
+      // s is SpSession: { id, started_at, ended_at, duration_min, event_count, dominant_app, apps[], urls[], summary }
+      const apps = Array.isArray(s.apps) ? s.apps : [s.dominant_app || '?'];
+      const appStr = apps.slice(0, 3).join(', ') + (apps.length > 3 ? ` +${apps.length - 3}` : '');
+      const durationStr = s.duration_min > 0 ? `${s.duration_min}m` : '<1m';
+      const urlCount = Array.isArray(s.urls) ? s.urls.length : 0;
+      // Encode started_at and ended_at as data attributes for the event loader
+      const safeStarted = encodeURIComponent(s.started_at);
+      const safeEnded = encodeURIComponent(s.ended_at);
       const card = document.createElement('div');
       card.style.cssText = 'margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden;';
       card.innerHTML = `
         <div style="padding:10px 14px;background:var(--surface);display:flex;align-items:center;gap:10px;cursor:pointer;"
-             onclick="toggleSessionEvents(${s.id}, this.parentElement)">
+             data-started="${safeStarted}" data-ended="${safeEnded}"
+             onclick="toggleSessionEvents(this.dataset.started, this.dataset.ended, this.parentElement)">
           <div style="flex:1;min-width:0;">
             <div style="font-size:12px;color:var(--text);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(appStr)}</div>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">${fmtDate(s.started_at)} · ${s.event_count} events${s.summary && s.summary !== 'too_short' && s.summary !== 'no_pattern' ? ' · <em style="color:var(--amber)">' + esc(s.summary) + '</em>' : ''}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">
+              ${fmtDate(s.started_at)} · ${durationStr} · ${s.event_count} events${urlCount > 0 ? ' · ' + urlCount + ' URLs' : ''}
+              ${s.summary ? ' · <em style="color:var(--amber)">' + esc(s.summary.slice(0, 60)) + '</em>' : ''}
+            </div>
           </div>
           <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
-            <button onclick="event.stopPropagation();saveSessionAsSkill(${s.id},this)"
+            <button onclick="event.stopPropagation();saveSessionAsSkill(decodeURIComponent('${safeStarted}'),decodeURIComponent('${safeEnded}'),this)"
               style="font-size:11px;padding:3px 10px;border-radius:5px;border:1px solid var(--border);
                      background:none;color:var(--text-muted);cursor:pointer;font-family:var(--font);">
-              Save as skill
+              Extract pattern
             </button>
             <span style="font-size:10px;color:var(--text-dim);">▸</span>
           </div>
         </div>
-        <div class="session-events" style="display:none;" data-sid="${s.id}"></div>`;
+        <div class="session-events" style="display:none;"></div>`;
       list.appendChild(card);
     }
   } catch(e) {
@@ -1655,7 +1665,7 @@ async function loadTimeline() {
   }
 }
 
-async function toggleSessionEvents(sid, card) {
+async function toggleSessionEvents(startedAtEnc, endedAtEnc, card) {
   const evContainer = card.querySelector('.session-events');
   if (!evContainer) return;
   if (evContainer.style.display !== 'none') {
@@ -1669,38 +1679,61 @@ async function toggleSessionEvents(sid, card) {
   evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-muted);font-size:11px;">Loading events…</div>';
   evContainer.style.display = 'block';
   try {
-    const events = await api.timeline.events(sid);
+    const startedAt = decodeURIComponent(startedAtEnc);
+    const endedAt = decodeURIComponent(endedAtEnc);
+    const events = await api.timeline.events(startedAt, endedAt);
     if (!events || events.length === 0) {
-      evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:11px;">No events stored for this session.</div>';
+      evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:11px;">No events found for this session window.</div>';
     } else {
+      // Group consecutive key events into typed strings
       const rows = events.map(e => {
-        // Primary label: element name > browser URL > window name > coordinates
+        // label: element_name > typed text > browser URL > window > app
         const label = e.element_name
-          ? e.element_name.slice(0, 60)
-          : e.url
-            ? e.url.replace(/^https?:\/\//, '').slice(0, 60)
-            : e.window_name
-              ? e.window_name.slice(0, 60)
-              : (e.element_role ? '' : `(${e.type})`);
+          ? e.element_name.slice(0, 70)
+          : e.text_content
+            ? ''  // will show as valueStr below
+            : e.browser_url
+              ? e.browser_url.replace(/^https?:\/\//, '').slice(0, 70)
+              : e.window_name
+                ? e.window_name.slice(0, 60)
+                : e.app_name || `(${e.event_type})`;
 
-        // Secondary: role badge + typed value
-        const roleBadge = e.element_role
+        const roleBadge = e.element_role && !['AXGroup','AXScrollArea'].includes(e.element_role)
           ? `<span style="font-size:9px;color:var(--text-dim);background:var(--border);
                border-radius:3px;padding:1px 4px;flex-shrink:0;">${esc(e.element_role.replace('AX',''))}</span>`
           : '';
-        const valueStr = e.value && !e.value.startsWith('key:')
-          ? `<span style="color:var(--green);margin-left:4px;">"${esc(e.value.slice(0,40))}"</span>` : '';
-        const keyStr = e.value && e.value.startsWith('key:')
-          ? `<span style="color:var(--blue);margin-left:4px;">${esc(e.value.slice(4))}</span>` : '';
+
+        const typeStr = e.text_content
+          ? `<span style="color:var(--green);margin-left:4px;">"${esc(e.text_content.slice(0,60))}"</span>`
+          : '';
+
+        const keyStr = e.key_code != null && !e.text_content
+          ? `<span style="color:var(--blue);margin-left:4px;font-size:10px;">key:${e.key_code}</span>`
+          : '';
+
+        // Frame context tooltip (show first 120 chars of what was on screen)
+        const frameHint = e.frame_text && e.frame_text.trim().length > 10
+          ? `<span style="font-size:9px;color:var(--text-dim);margin-left:6px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;" title="${esc(e.frame_text)}">[${esc(e.frame_text.slice(0,40).replace(/\n/g,'·'))}…]</span>`
+          : '';
+
+        // Colour the event type
+        const typeColor = e.event_type === 'click' ? 'var(--amber)'
+          : e.event_type === 'key' ? 'var(--blue)'
+          : e.event_type === 'clipboard' ? 'var(--green)'
+          : 'var(--text-muted)';
 
         return `<div style="padding:4px 14px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);">
-          <span style="font-size:10px;color:var(--text-dim);flex-shrink:0;width:46px;">${fmtTime(e.ts)}</span>
-          <span style="font-size:10px;font-weight:600;color:var(--amber);flex-shrink:0;width:52px;text-transform:uppercase;letter-spacing:.02em;">${esc(e.type)}</span>
-          <span style="font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${esc(label)}${valueStr}${keyStr}</span>
-          ${roleBadge}
+          <span style="font-size:10px;color:var(--text-dim);flex-shrink:0;width:46px;">${fmtTime(e.timestamp)}</span>
+          <span style="font-size:10px;font-weight:600;color:${typeColor};flex-shrink:0;width:48px;text-transform:uppercase;letter-spacing:.02em;">${esc(e.event_type)}</span>
+          <span style="font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${esc(label)}${typeStr}${keyStr}</span>
+          ${roleBadge}${frameHint}
         </div>`;
       }).join('');
-      evContainer.innerHTML = `<div style="max-height:220px;overflow-y:auto;">${rows}</div>`;
+      evContainer.innerHTML = `
+        <div style="padding:4px 14px;font-size:10px;color:var(--text-dim);background:#0a0a0a;border-bottom:1px solid var(--border);">
+          ${events.length} events · ${events.filter(e=>e.browser_url).length} with URL · ${events.filter(e=>e.frame_text).length} with screen context
+        </div>
+        <div style="max-height:280px;overflow-y:auto;">${rows}</div>`;
     }
     evContainer.dataset.loaded = '1';
   } catch(e) {
@@ -1708,12 +1741,12 @@ async function toggleSessionEvents(sid, card) {
   }
 }
 
-async function saveSessionAsSkill(sid, btn) {
+async function saveSessionAsSkill(startedAt, endedAt, btn) {
   btn.disabled = true;
-  btn.textContent = 'Saving…';
+  btn.textContent = 'Extracting…';
   try {
-    await api.timeline.saveAsSkill(sid);
-    btn.textContent = 'Saved ✓';
+    await api.timeline.saveAsSkill(startedAt, endedAt);
+    btn.textContent = 'Done ✓';
   } catch {
     btn.textContent = 'Error';
     btn.disabled = false;
@@ -1730,24 +1763,22 @@ async function loadRecordings() {
       list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:8px 0;">No recorded sessions yet — Ghostwork will detect patterns as you work.</div>';
       return;
     }
-    // Group by summary (workflow name derived from NREM analysis)
+    // Group by dominant app + URL domain patterns
     const byPattern = {};
     for (const s of sessions) {
-      if (!s.summary || s.summary === 'too_short' || s.summary === 'no_pattern') continue;
-      if (!byPattern[s.summary]) byPattern[s.summary] = { name: s.summary, count: 0, lastSeen: s.started_at };
-      byPattern[s.summary].count++;
-      if (s.started_at > byPattern[s.summary].lastSeen) byPattern[s.summary].lastSeen = s.started_at;
+      const key = s.summary && s.summary.length > 4 ? s.summary.slice(0, 60) : s.dominant_app;
+      if (!key) continue;
+      if (!byPattern[key]) byPattern[key] = { name: key, count: 0, lastSeen: s.started_at, totalEvents: 0 };
+      byPattern[key].count++;
+      byPattern[key].totalEvents += s.event_count || 0;
+      if (s.started_at > byPattern[key].lastSeen) byPattern[key].lastSeen = s.started_at;
     }
-    const patterns = Object.values(byPattern).sort((a, b) => b.count - a.count);
-    if (patterns.length === 0) {
-      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:8px 0;">Sessions captured but no patterns extracted yet — check back after the nightly consolidation.</div>';
-      return;
-    }
+    const patterns = Object.values(byPattern).sort((a, b) => b.count - a.count).slice(0, 15);
     list.innerHTML = patterns.map(p => `
       <div style="display:flex;align-items:center;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;margin-bottom:6px;gap:10px;">
         <div style="flex:1;min-width:0;">
           <div style="font-size:12px;color:var(--text);font-weight:500;">${esc(p.name)}</div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Last seen ${fmtDate(p.lastSeen)}</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Last seen ${fmtDate(p.lastSeen)} · ${p.totalEvents} total events</div>
         </div>
         <span style="font-size:11px;color:var(--amber);background:#1a1200;border:1px solid #3a2800;padding:2px 8px;border-radius:10px;flex-shrink:0;">${p.count}× seen</span>
       </div>`).join('');

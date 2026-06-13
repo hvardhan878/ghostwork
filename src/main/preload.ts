@@ -3,12 +3,6 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("ghostwork", {
   platform: process.platform,
 
-  screenpipe: {
-    health: () => ipcRenderer.invoke("screenpipe:health"),
-    recent: (hours?: number, excludedApps?: string[]) =>
-      ipcRenderer.invoke("screenpipe:recent", hours, excludedApps),
-  },
-
   openrouter: {
     status: () => ipcRenderer.invoke("openrouter:status"),
     test: () => ipcRenderer.invoke("openrouter:test"),
@@ -51,8 +45,22 @@ contextBridge.exposeInMainWorld("ghostwork", {
 
   timeline: {
     sessions: (days?: number) => ipcRenderer.invoke("timeline:sessions", days ?? 7),
-    events: (sessionId: number) => ipcRenderer.invoke("timeline:events", sessionId),
-    saveAsSkill: (sessionId: number) => ipcRenderer.invoke("timeline:save-as-skill", sessionId),
+    /** Fetch enriched events for a session by its start/end timestamps */
+    events: (startedAt: string, endedAt: string) =>
+      ipcRenderer.invoke("timeline:events", startedAt, endedAt),
+    saveAsSkill: (startedAt: string, endedAt: string) =>
+      ipcRenderer.invoke("timeline:save-as-skill", startedAt, endedAt),
+    /** Get a plain-text summary of activity in a time window */
+    activityText: (sinceIso: string, untilIso: string) =>
+      ipcRenderer.invoke("timeline:activity-text", sinceIso, untilIso),
+  },
+
+  screenpipe: {
+    health: () => ipcRenderer.invoke("screenpipe:health"),
+    recent: (hours?: number, excludedApps?: string[]) =>
+      ipcRenderer.invoke("screenpipe:recent", hours, excludedApps),
+    search: (query: string, sinceIso?: string) =>
+      ipcRenderer.invoke("screenpipe:search", query, sinceIso),
   },
 
   profile: {
@@ -60,7 +68,7 @@ contextBridge.exposeInMainWorld("ghostwork", {
   },
 
   debug: {
-    screenpipeRaw: (type: string) => ipcRenderer.invoke("debug:screenpipe-raw", type),
+    screenpipeRaw: () => ipcRenderer.invoke("debug:screenpipe-raw"),
   },
 
   db: {

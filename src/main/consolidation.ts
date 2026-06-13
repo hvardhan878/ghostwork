@@ -38,6 +38,7 @@ import {
 import { promptJSON } from "./openrouter";
 import { writeBehaviourProfile } from "./behaviourProfile";
 import { runExtractionJob } from "./extractor";
+import { buildActivityText, queryAppActivity } from "./screenpipeDb";
 
 // ─── NREM: episodic → semantic ─────────────────────────────────────────────
 
@@ -70,13 +71,80 @@ function serializeSession(events: RawEvent[]): string {
 async function runNrem(): Promise<void> {
   console.log("[consolidation:nrem] Starting episodic → semantic promotion …");
 
+  // ── Primary: use Screenpipe's rich activity text (frames + events + audio + clipboard)
+  // Covers the last 24 hours as NREM runs nightly.
+  const now = new Date();
+  const since24h = new Date(now.getTime() - 24 * 3600_000).toISOString();
+  const activityText = buildActivityText(since24h, now.toISOString(), 30_000);
+  const appActivity = queryAppActivity(since24h, now.toISOString());
+
+  if (activityText.length > 200) {
+    console.log(`[consolidation:nrem] Analysing Screenpipe activity text (${activityText.length} chars, ${appActivity.length} app contexts) …`);
+
+    const appsStr = appActivity.slice(0, 10)
+      .map((a) => `${a.app_name}${a.url_domain ? " @ " + a.url_domain : ""} (${a.event_count} events)`)
+      .join(", ");
+
+    const spPrompt = `You are doing a nightly analysis of a user's work behaviour to extract durable patterns.
+
+ACTIVITY DATA (last 24 hours — frames, keystrokes, audio, clipboard):
+${activityText.slice(0, 28_000)}
+
+Apps and sites used (by frequency): ${appsStr}
+
+Extract meaningful workflow patterns. Return JSON only:
+{
+  "workflows": [
+    {
+      "name": "short workflow name (3-6 words)",
+      "description": "one sentence describing what this workflow accomplishes",
+      "confidence": 0.4,
+      "rules": [
+        {
+          "condition": "observable screen state that triggers this (app + URL/content)",
+          "action": "what the user does when in that state",
+          "confidence": 0.4
+        }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Only include patterns that appear intentional and goal-directed
+- Do not include one-off navigation or random browsing
+- Focus on repeated sequences across multiple time windows
+- Confidence 0.3-0.5 for first observations; 0.0 if uncertain
+- If no clear patterns, return {"workflows":[]}`;
+
+    const result = await promptJSON<{ workflows: NremWorkflow[] }>(spPrompt);
+    if (result?.workflows && result.workflows.length > 0) {
+      let promoted = 0;
+      for (const wf of result.workflows) {
+        if (!wf.name) continue;
+        const workflow = upsertWorkflow(wf.name, wf.description ?? "", [], wf.confidence);
+        for (const rule of wf.rules ?? []) {
+          if (!rule.condition || !rule.action) continue;
+          upsertRule(workflow.id, rule.condition, rule.action, rule.confidence, []);
+          promoted++;
+        }
+      }
+      console.log(`[consolidation:nrem] Promoted ${promoted} rule(s) from ${result.workflows.length} workflow(s) via Screenpipe data.`);
+    } else {
+      console.log("[consolidation:nrem] No patterns found in Screenpipe activity.");
+    }
+  }
+
+  // ── Fallback: unsummarised Ghostwork raw_events sessions (browser-recorded)
   const sessions = getUnsummarisedSessions();
   if (sessions.length === 0) {
-    console.log("[consolidation:nrem] No unsummarised sessions — skipping.");
+    if (activityText.length <= 200) {
+      console.log("[consolidation:nrem] No unsummarised sessions and no Screenpipe data — skipping.");
+    }
     return;
   }
 
-  console.log(`[consolidation:nrem] Analysing ${sessions.length} session(s) …`);
+  console.log(`[consolidation:nrem] Also analysing ${sessions.length} Ghostwork session(s) …`);
   let promoted = 0;
 
   for (const session of sessions) {

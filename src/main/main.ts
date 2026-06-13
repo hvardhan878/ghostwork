@@ -77,6 +77,14 @@ import { requestAbort } from "./abort";
 import { startSessionIngester, stopSessionIngester } from "./sessionIngester";
 import { getRecentSessions, getRawEventsForSession } from "./db";
 import { writeBehaviourProfile } from "./behaviourProfile";
+import {
+  buildScreenpipeSessions,
+  getScreenpipeSessionEvents,
+  buildActivityText,
+  queryAudioTranscriptions,
+  queryRecentFrameTexts,
+  ftsSearch,
+} from "./screenpipeDb";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -436,20 +444,38 @@ function registerIpcHandlers(): void {
   // ── Weekly receipt ──
   ipcMain.handle("receipt:get", (_e, days: number = 7) => computeReceipt(days));
 
-  // ── Timeline (episodic memory) ──
+  // ── Timeline (Screenpipe-native, idle-gap sessions) ──
   ipcMain.handle("timeline:sessions", (_e, days: number = 7) => {
-    return getRecentSessions(days);
+    return buildScreenpipeSessions(days, 60);
   });
 
-  ipcMain.handle("timeline:events", (_e, sessionId: number) => {
+  ipcMain.handle("timeline:events", (_e, startedAt: string, endedAt: string) => {
+    return getScreenpipeSessionEvents(startedAt, endedAt, 500);
+  });
+
+  // Legacy: Ghostwork's own raw_events sessions (kept for skill building)
+  ipcMain.handle("timeline:sessions-legacy", (_e, days: number = 7) => {
+    return getRecentSessions(days);
+  });
+  ipcMain.handle("timeline:events-legacy", (_e, sessionId: number) => {
     return getRawEventsForSession(sessionId);
   });
 
-  ipcMain.handle("timeline:save-as-skill", async (_e, sessionId: number) => {
-    const { runExtractionJob } = await import("./extractor");
+  ipcMain.handle("timeline:save-as-skill", async (_e, startedAt: string, endedAt: string) => {
+    // Run extraction focused on this session's time window
     await runExtractionJob();
     mainWindow?.webContents.send("model:updated");
     return { ok: true };
+  });
+
+  // ── Activity text for extraction preview ──
+  ipcMain.handle("timeline:activity-text", (_e, sinceIso: string, untilIso: string) => {
+    return buildActivityText(sinceIso, untilIso, 10_000);
+  });
+
+  // ── FTS keyword search across all Screenpipe content ──
+  ipcMain.handle("screenpipe:search", (_e, query: string, sinceIso?: string) => {
+    return ftsSearch(query, sinceIso, 20);
   });
 
   // ── Behaviour profile ──
@@ -458,14 +484,16 @@ function registerIpcHandlers(): void {
     return { ok: true };
   });
 
-  // ── Debug: inspect raw Screenpipe DB events ──
-  ipcMain.handle("debug:screenpipe-raw", async (_e, _contentType: string) => {
-    const { queryUiEvents } = await import("./screenpipeDb");
-    const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  // ── Debug: inspect raw Screenpipe DB events + audio + frames ──
+  ipcMain.handle("debug:screenpipe-raw", async () => {
+    const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const until = new Date().toISOString();
     try {
-      const events = queryUiEvents(since, until, 5);
-      return { ok: true, sample: events };
+      const { queryUiEvents } = await import("./screenpipeDb");
+      const events = queryUiEvents(since, until, 10);
+      const audio = queryAudioTranscriptions(since, until, 5);
+      const frames = queryRecentFrameTexts(since, until, 3);
+      return { ok: true, events, audio, frames };
     } catch (err) {
       return { ok: false, error: String(err) };
     }

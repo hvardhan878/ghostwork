@@ -3,13 +3,13 @@
  *
  * Combines:
  *   - Frontmost app via AppleScript (always accurate, instant)
- *   - Active browser tab title + URL via AppleScript (fixes Screenpipe's
- *     blindness inside browsers)
- *   - Recent OCR text from Screenpipe as supplementary signal
+ *   - Active browser tab title + URL via AppleScript (fastest for live tab)
+ *   - Latest Screenpipe frame text from DB (replaces REST OCR — ~3.5 KB of
+ *     full page accessibility + OCR text vs the sparse REST response)
  */
 
 import { execFile } from "child_process";
-import { getRecentActivity } from "./screenpipe";
+import { getLatestFrameForApp } from "./screenpipeDb";
 
 export interface UserContext {
   app: string;
@@ -80,23 +80,21 @@ export async function getCurrentContext(
 
   const { title, url } = await getBrowserTab(app);
 
-  // Supplementary OCR from the last 2 minutes — best effort.
+  // Screenpipe frame full_text — much richer than the REST OCR endpoint.
+  // Tries exact app name first, then a broader 5-minute window for near-matches.
   let ocrText = "";
   try {
-    const items = await getRecentActivity(0.033, excludedApps, 10);
-    ocrText = items
-      .filter((i) => (i.app_name ?? "").toLowerCase() === lowerApp)
-      .map((i) => i.text ?? "")
-      .filter((t) => t.trim().length > 0)
-      .join(" ")
-      .slice(0, 800);
+    const frame = getLatestFrameForApp(app, 3) ?? getLatestFrameForApp(app, 5);
+    if (frame?.text) {
+      ocrText = frame.text;
+    }
   } catch {
-    // Screenpipe down — context still useful without OCR.
+    // Screenpipe DB unavailable — context still useful without OCR.
   }
 
   return {
     app,
-    windowTitle: title,
+    windowTitle: title || "",
     url,
     ocrText,
     timestamp: Date.now(),

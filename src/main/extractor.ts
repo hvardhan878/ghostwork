@@ -1,11 +1,17 @@
 /**
  * Pattern extraction job — runs every 60 minutes.
- * Queries Screenpipe for the last hour, strips PII, sends to Claude via
- * OpenRouter, parses the structured JSON response, and merges into the
- * local behaviour model.
+ *
+ * Data sources (richest first):
+ *  1. Screenpipe DB buildActivityText(): frames.full_text (~3.5 KB/frame) +
+ *     typed text, clicks + audio transcriptions + clipboard events.
+ *  2. Screenpipe DB queryRecentOcr(): OCR-only rows as fallback.
+ *  3. Screenpipe REST API: last resort when DB is unavailable.
+ *
+ * All data is PII-stripped before being sent to the LLM.
  */
 
 import { getRecentActivity, ContentItem } from "./screenpipe";
+import { buildActivityText, queryRecentOcr } from "./screenpipeDb";
 import { promptJSON } from "./openrouter";
 import { upsertWorkflow, upsertRule, getSetting, setSetting } from "./db";
 import { getBehaviourProfileText } from "./behaviourProfile";
@@ -71,8 +77,14 @@ function buildExtractionPrompt(activityText: string, focusCategories: string[] =
     ? `EXISTING BEHAVIOURAL PROFILE (use this to avoid duplicating known patterns):\n${profile.slice(0, 2000)}\n\n`
     : "";
 
-  return `${categoryInstruction}${profileSection}You are analysing a knowledge worker's computer activity from the last hour.
+  return `${categoryInstruction}${profileSection}You are analysing a knowledge worker's computer activity from the last 2 hours.
 Your task: extract repeating workflows and inferred behavioural rules.
+
+The activity data below combines:
+- [SCREEN] sections: full page accessibility text + OCR (~3.5 KB per frame capture)
+- User actions: exact keystrokes typed and UI elements clicked with timestamps
+- [MIC]/[AUDIO]: spoken words transcribed from microphone or system audio
+- CLIPBOARD: text that was copied or pasted (high-signal intent indicator)
 
 ACTIVITY DATA:
 ${activityText}
@@ -175,49 +187,72 @@ function filterByFocusCategories(items: ContentItem[], categories: string[]): Co
 // ─── Extraction job ───────────────────────────────────────────────────────────
 
 export async function runExtractionJob(): Promise<void> {
-  console.log("[extractor] Starting hourly pattern extraction …");
+  console.log("[extractor] Starting pattern extraction …");
 
-  const excludedAppsRaw = getSetting("excluded_apps", "[]");
-  let excludedApps: string[] = [];
-  try {
-    excludedApps = JSON.parse(excludedAppsRaw) as string[];
-  } catch {
-    excludedApps = [];
-  }
+  const now = new Date();
+  const since2h = new Date(now.getTime() - 2 * 3600_000).toISOString();
+  const since6h = new Date(now.getTime() - 6 * 3600_000).toISOString();
+  const nowIso = now.toISOString();
 
-  let items: ContentItem[];
-  try {
-    items = await getRecentActivity(2, excludedApps, 100);
-    // If the last 2 hours are empty (user was idle), look back further so a
-    // single active session earlier in the day still gets analysed.
-    if (items.length === 0) {
-      items = await getRecentActivity(6, excludedApps, 100);
+  // ── Primary: Screenpipe DB buildActivityText ──────────────────────────────
+  // Combines frames.full_text (~3.5 KB/frame), typed events, audio, clipboard.
+  let activityText = buildActivityText(since2h, nowIso);
+
+  if (!activityText || activityText.length < 200) {
+    // Expand window if recent activity is sparse
+    activityText = buildActivityText(since6h, nowIso);
+    if (activityText.length >= 200) {
+      console.log("[extractor] Using 6-hour window from Screenpipe DB");
     }
-  } catch (err) {
-    console.warn("[extractor] Could not fetch screenpipe data:", err);
-    return;
+  } else {
+    console.log(`[extractor] Using 2-hour window from Screenpipe DB (${activityText.length} chars)`);
   }
 
-  if (items.length === 0) {
-    console.log("[extractor] No activity data in last 6 hours — skipping.");
-    return;
-  }
-
-  // Filter by focus categories if configured.
-  const focusCategories = parseFocusCategories(getSetting("focus_categories", "[]"));
-  if (focusCategories.length > 0) {
-    items = filterByFocusCategories(items, focusCategories);
-    if (items.length === 0) {
-      console.log("[extractor] No items match focus categories — skipping.");
-      return;
+  // ── Fallback: OCR-only rows ───────────────────────────────────────────────
+  if (!activityText || activityText.length < 100) {
+    const ocrRows = queryRecentOcr(since6h, nowIso, 120);
+    if (ocrRows.length >= 3) {
+      activityText = ocrRows
+        .map((r) =>
+          `[OCR] ${r.app_name} / ${r.window_name}${r.browser_url ? ` (${r.browser_url})` : ""}: ${r.text.slice(0, 300)}`
+        )
+        .join("\n");
+      console.log(`[extractor] Fallback: ${ocrRows.length} OCR rows from Screenpipe DB`);
     }
   }
 
-  console.log(`[extractor] Processing ${items.length} events …`);
-  const activityText = sanitiseItems(items);
+  // ── Last resort: Screenpipe REST API ─────────────────────────────────────
+  let items: ContentItem[] = [];
+  if (!activityText || activityText.length < 100) {
+    const excludedAppsRaw = getSetting("excluded_apps", "[]");
+    let excludedApps: string[] = [];
+    try { excludedApps = JSON.parse(excludedAppsRaw) as string[]; } catch { /* */ }
 
+    try {
+      items = await getRecentActivity(2, excludedApps, 100);
+      if (items.length === 0) items = await getRecentActivity(6, excludedApps, 100);
+    } catch (err) {
+      console.warn("[extractor] Could not fetch Screenpipe REST data:", err);
+    }
+
+    if (items.length > 0) {
+      const focusCategories = parseFocusCategories(getSetting("focus_categories", "[]"));
+      if (focusCategories.length > 0) {
+        items = filterByFocusCategories(items, focusCategories);
+      }
+      activityText = sanitiseItems(items);
+      console.log(`[extractor] REST fallback: ${items.length} items`);
+    }
+  }
+
+  if (!activityText || activityText.length < 50) {
+    console.log("[extractor] No activity data found — skipping.");
+    return;
+  }
+
+  const focusCats = parseFocusCategories(getSetting("focus_categories", "[]"));
   const result = await promptJSON<ExtractionResult>(
-    buildExtractionPrompt(activityText, focusCategories)
+    buildExtractionPrompt(stripPII(activityText), focusCats)
   );
 
   if (!result || !Array.isArray(result.workflows)) {
