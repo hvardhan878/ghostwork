@@ -1,6 +1,7 @@
 # Ghostwork
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/HxhDfs4H39)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue?style=for-the-badge&logo=gnu&logoColor=white)](LICENSE)
 
 > **The first agent you don't prompt.**
 
@@ -165,4 +166,4 @@ Open issues on GitHub — look for `good first issue` labels.
 
 ## Licence
 
-MIT
+GPL-3.0 — see [LICENSE](LICENSE) for details.
