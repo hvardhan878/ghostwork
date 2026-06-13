@@ -8,7 +8,7 @@
  *
  * Events are grouped into sessions by 5-minute idle gaps.
  *
- * Zoral-inspired prediction pass: after each batch is ingested, a sliding
+ * Prediction pass: after each batch is ingested, a sliding
  * 5-event window is sent to a cheap LLM — "predict event 5 given events 1–4".
  * The delta between prediction and reality is stored as prediction_error.
  * High-error events are surprising and carry more learning signal; the
@@ -151,7 +151,7 @@ async function poll(): Promise<void> {
   }
 }
 
-// ─── Zoral-inspired prediction pass ──────────────────────────────────────────
+// ─── Prediction pass ─────────────────────────────────────────────────────────
 // For each sliding window of PREDICTION_WINDOW events, we ask the LLM to
 // predict the final event given the preceding ones, then compare to reality.
 // High prediction error = surprising moment = high learning value.

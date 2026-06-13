@@ -7,7 +7,7 @@
  *  2. Screenpipe DB queryRecentOcr(): OCR-only rows as fallback.
  *  3. Screenpipe REST API: last resort when DB is unavailable.
  *
- * Extraction uses 7 structured categories (Zoral-inspired):
+ * Extraction uses 7 structured categories:
  *   navigation, data_transform, communication, search_to_action,
  *   scheduled, multi_app, correction
  *
@@ -370,7 +370,7 @@ export async function runExtractionJob(): Promise<void> {
     return;
   }
 
-  // ── Prepend high-delta events (Zoral: weight surprising moments) ──────────
+  // ── Prepend high-delta events (weight surprising moments) ──────────────────
   const highDelta = buildHighDeltaSection(since2h, nowIso);
   const combinedText = (highDelta + activityText).slice(0, 45_000);
 

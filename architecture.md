@@ -28,7 +28,7 @@ No manual training. No "record a macro" flow. No suggestion popups. It learns pu
 │  1. Pull new ui_events from Screenpipe DB               │
 │  2. Group into sessions by 5-min idle gaps              │
 │  3. Insert into raw_events with app/url/element data    │
-│  4. Run Prediction Pass (Zoral-inspired):               │
+│  4. Run Prediction Pass:                                │
 │     • Sliding 5-event window                            │
 │     • LLM predicts next action from first 4             │
 │     • Token-overlap delta → prediction_error (0–1)      │
@@ -104,7 +104,7 @@ Configured globally in Settings → Autonomy Level. Default: supervised.
 
 ---
 
-## Predict → Observe → Compare (Zoral-inspired)
+## Predict → Observe → Compare
 
 Every 2-minute ingestion poll runs a prediction pass on the most recent events:
 

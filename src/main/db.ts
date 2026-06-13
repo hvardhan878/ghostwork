@@ -166,7 +166,7 @@ function migrate(db: Database.Database): void {
       locators         TEXT,              -- JSON RankedLocator[] (browser source only)
       value            TEXT,              -- typed text / clipboard (max 300 chars)
       source           TEXT    NOT NULL DEFAULT 'screenpipe',
-      prediction_error REAL    DEFAULT NULL  -- 0.0–1.0; high = surprising event (Zoral delta signal)
+      prediction_error REAL    DEFAULT NULL  -- 0.0–1.0; high = surprising event
     );
 
     CREATE INDEX IF NOT EXISTS idx_raw_events_session ON raw_events(session_id);
@@ -973,7 +973,7 @@ export interface RawEvent {
   locators: string | null;  // JSON RankedLocator[]
   value: string | null;
   source: string;
-  prediction_error: number | null;  // 0.0–1.0; high = surprising event (Zoral delta signal)
+  prediction_error: number | null;  // 0.0–1.0; high = surprising event
 }
 
 /** Update the prediction_error for a raw event after the prediction pass. */
