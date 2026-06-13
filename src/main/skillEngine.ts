@@ -238,6 +238,20 @@ export async function replaySkill(skill: Skill, opts: ReplayOptions = {}): Promi
     setGhostState("working");
   }
 
+  // Track completed steps for rollback on failure.
+  const completedSteps: SkillStep[] = [];
+
+  /** Fire Cmd+Z once to undo the last reversible text action in the browser. */
+  async function pressUndo(page: Page): Promise<void> {
+    await page.keyboard.press("Meta+z").catch(() => {});
+    await page.waitForTimeout(150);
+  }
+
+  /** Text-filling actions are OS-undoable via Cmd+Z; navigation/clicks are not. */
+  function isReversible(step: SkillStep): boolean {
+    return step.action === "fill" || step.action === "press";
+  }
+
   try {
     const page = await getOrCreatePage(firstUrlHint(skill.steps));
 
@@ -249,7 +263,7 @@ export async function replaySkill(skill: Skill, opts: ReplayOptions = {}): Promi
         const approvalId = queueApproval(skill.id, runId, step.description, {
           remainingSteps: remaining,
           url: page.url(),
-        });
+        }, skill.rule_id ?? null);
         log(`staged external step for approval (#${approvalId}): ${step.description}`);
         finishSkillRun(runId, true, stepsLog, undefined, Date.now() - started);
         void import("./approvals").then((a) =>
@@ -266,6 +280,7 @@ export async function replaySkill(skill: Skill, opts: ReplayOptions = {}): Promi
         skill.steps[i] = { ...step, locators: healedLocators };
         healedAny = true;
       }
+      completedSteps.push(step);
       log(`${step.action}: ${step.description.slice(0, 70)}`);
 
       const verifyErr = await verifyStep(page, step);
@@ -278,8 +293,23 @@ export async function replaySkill(skill: Skill, opts: ReplayOptions = {}): Promi
     return { success: true, stepsExecuted: skill.steps.length, stepsLog };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+
+    // Rollback: undo text-filling steps in reverse order.
+    const reversible = completedSteps.filter(isReversible);
+    if (reversible.length > 0) {
+      log(`rolling back ${reversible.length} reversible step(s) via Cmd+Z`);
+      try {
+        const page = await getOrCreatePage();
+        for (let i = reversible.length - 1; i >= 0; i--) {
+          await pressUndo(page);
+        }
+      } catch {
+        // Rollback is best-effort — never mask the original error.
+      }
+    }
+
     finishSkillRun(runId, false, stepsLog, msg, Date.now() - started);
-    return { success: false, stepsExecuted: stepsLog.length, stepsLog, error: msg };
+    return { success: false, stepsExecuted: completedSteps.length, stepsLog, error: msg };
   } finally {
     if (!opts.silent) {
       hideHud();

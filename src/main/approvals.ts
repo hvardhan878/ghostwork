@@ -10,6 +10,8 @@ import {
   getApprovalById,
   getPendingApprovals,
   resolveApproval,
+  acceptRule,
+  dismissRule,
   SkillStep,
 } from "./db";
 import { showNudgeWindow } from "./nudgeWindow";
@@ -59,6 +61,8 @@ export async function approveAndContinue(
   } catch {}
 
   resolveApproval(approvalId, "approved");
+  // Approval counts as positive feedback — same signal as accepting a supervised execution.
+  if (approval.rule_id) acceptRule(approval.rule_id);
   onChanged();
 
   if (remainingSteps.length === 0) {
@@ -76,7 +80,10 @@ export async function approveAndContinue(
 }
 
 export function rejectApproval(approvalId: number): void {
+  const approval = getApprovalById(approvalId);
   resolveApproval(approvalId, "rejected");
+  // Rejection counts as negative feedback — same signal as dismissing a supervised execution.
+  if (approval?.rule_id) dismissRule(approval.rule_id);
   console.log(`[approvals] #${approvalId} rejected`);
   onChanged();
 }

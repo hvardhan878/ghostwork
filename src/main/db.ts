@@ -182,6 +182,7 @@ function migrate(db: Database.Database): void {
   safeAddColumn(db, 'rules', 'action_steps', "TEXT NOT NULL DEFAULT '[]'");
   safeAddColumn(db, 'rules', 'category', "TEXT NOT NULL DEFAULT 'navigation'");
   safeAddColumn(db, 'raw_events', 'prediction_error', "REAL DEFAULT NULL");
+  safeAddColumn(db, 'approvals', 'rule_id', "INTEGER REFERENCES rules(id) ON DELETE SET NULL");
 
   // One-time wipe for the v2 decision engine: old keyword-era rules carry
   // made-up confidence and no executable steps — start clean and relearn.
@@ -252,7 +253,7 @@ export function upsertWorkflow(
     const newCount = existing.observed_count + 1;
     const newConf = Math.min(
       1.0,
-      existing.confidence + (confidence - existing.confidence) * 0.3
+      existing.confidence + (confidence - existing.confidence) * 0.5
     );
     db.prepare(`
       UPDATE workflows SET
@@ -375,7 +376,7 @@ export function upsertRule(
     const newCount = existing.observed_count + 1;
     const newConf = Math.min(
       1.0,
-      existing.confidence + (confidence - existing.confidence) * 0.3
+      existing.confidence + (confidence - existing.confidence) * 0.5
     );
     const steps = actionSteps.length > 0 ? stepsJson : existing.action_steps;
     db.prepare(`
@@ -442,7 +443,10 @@ export function dismissRule(ruleId: number): void {
 /**
  * Autonomy is earned through user feedback, never asserted by the LLM:
  *   - supervised: default for all rules (execute + HUD + Cmd+Z undo)
- *   - autonomous: >= 8 accepts AND no rejection among the last 10 outcomes
+ *   - autonomous: >= 5 accepts AND < 2 rejections among the last 10 outcomes
+ *
+ * The hysteresis (< 2 not == 0) prevents a single accidental undo from
+ * immediately dropping an otherwise trustworthy rule back to supervised.
  *
  * There is no "suggest" tier — the system acts, it doesn't ask.
  * (LLM extraction confidence is used only for ranking/pruning.)
@@ -455,11 +459,11 @@ export function earnedTier(rule: Rule): ConfidenceTier {
     LIMIT 10
   `).all(rule.id) as { status: string }[];
 
-  const last10HasRejection = recent.some(
+  const recentRejections = recent.filter(
     (r) => r.status === "rejected" || r.status === "undone"
-  );
-  if (rule.accept_count >= 8 && !last10HasRejection) return "autonomous";
+  ).length;
 
+  if (rule.accept_count >= 5 && recentRejections < 2) return "autonomous";
   return "supervised";
 }
 
@@ -823,6 +827,7 @@ export interface Approval {
   id: number;
   skill_id: number | null;
   run_id: number | null;
+  rule_id: number | null;
   description: string;
   payload: string;
   status: "pending" | "approved" | "rejected";
@@ -834,12 +839,13 @@ export function queueApproval(
   skillId: number | null,
   runId: number | null,
   description: string,
-  payload: object
+  payload: object,
+  ruleId: number | null = null
 ): number {
   const info = getDb().prepare(`
-    INSERT INTO approvals (skill_id, run_id, description, payload)
-    VALUES (?, ?, ?, ?)
-  `).run(skillId, runId, description, JSON.stringify(payload));
+    INSERT INTO approvals (skill_id, run_id, rule_id, description, payload)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(skillId, runId, ruleId, description, JSON.stringify(payload));
   return info.lastInsertRowid as number;
 }
 

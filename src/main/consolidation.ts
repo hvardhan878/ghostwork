@@ -31,6 +31,8 @@ import {
   upsertWorkflow,
   upsertRule,
   createSkill,
+  getDb,
+  Session,
   RawEvent,
   SkillStep,
   SkillAction,
@@ -136,26 +138,47 @@ Rules:
   }
 
   // ── Fallback: unsummarised Ghostwork raw_events sessions (browser-recorded)
-  const sessions = getUnsummarisedSessions();
-  if (sessions.length === 0) {
+  const rawSessions = getUnsummarisedSessions();
+  if (rawSessions.length === 0) {
     if (activityText.length <= 200) {
       console.log("[consolidation:nrem] No unsummarised sessions and no Screenpipe data — skipping.");
     }
     return;
   }
 
-  console.log(`[consolidation:nrem] Also analysing ${sessions.length} Ghostwork session(s) …`);
+  // Stitch sessions that share an app-family within 24h — enables cross-day
+  // workflows ("research Monday → draft Tuesday") to be extracted as one unit.
+  const stitchedGroups = stitchSessions(rawSessions);
+  console.log(
+    `[consolidation:nrem] Analysing ${rawSessions.length} Ghostwork session(s) ` +
+    `grouped into ${stitchedGroups.length} stitched chain(s) …`
+  );
   let promoted = 0;
 
-  for (const session of sessions) {
-    const events = getRawEventsForSession(session.id);
-    if (events.length < 3) {
-      updateSession(session.id, { summary: "too_short" });
+  for (const sessionGroup of stitchedGroups) {
+    // Collect all events across the stitched group
+    const groupEvents: RawEvent[] = [];
+    for (const session of sessionGroup) {
+      const events = getRawEventsForSession(session.id);
+      groupEvents.push(...events);
+    }
+    if (groupEvents.length < 3) {
+      for (const session of sessionGroup) {
+        updateSession(session.id, { summary: "too_short" });
+      }
       continue;
     }
+    // Use the last session in the group as the representative session
+    const session = sessionGroup[sessionGroup.length - 1];
 
-    const sequence = serializeSession(events);
-    const apps = (() => { try { return JSON.parse(session.apps) as string[]; } catch { return [session.app]; } })();
+    const sequence = serializeSession(groupEvents);
+    const apps = (() => {
+      const allApps = new Set<string>();
+      for (const s of sessionGroup) {
+        try { for (const a of JSON.parse(s.apps) as string[]) allApps.add(a); } catch { allApps.add(s.app); }
+      }
+      return [...allApps];
+    })();
 
     const prompt = `You are analysing a user's recorded work session to extract behavioural patterns.
 
@@ -192,7 +215,7 @@ Rules:
 
     const result = await promptJSON<{ workflows: NremWorkflow[] }>(prompt);
     if (!result || !Array.isArray(result.workflows)) {
-      updateSession(session.id, { summary: "no_pattern" });
+      for (const s of sessionGroup) updateSession(s.id, { summary: "no_pattern" });
       continue;
     }
 
@@ -208,7 +231,8 @@ Rules:
       promoted++;
     }
 
-    updateSession(session.id, { summary: wfName });
+    // Mark all sessions in the group as summarised.
+    for (const s of sessionGroup) updateSession(s.id, { summary: wfName });
   }
 
   console.log(`[consolidation:nrem] Promoted ${promoted} workflow(s) from sessions.`);
@@ -220,7 +244,11 @@ async function runRem(): Promise<void> {
   console.log("[consolidation:rem] Starting semantic → procedural promotion …");
 
   const rules = getAllRules().filter(
-    (r) => r.observed_count >= 3 && r.confidence >= 0.4
+    (r) =>
+      // 2 observations + at least 1 accepted execution is enough signal for skill compilation.
+      (r.observed_count >= 2 && r.accept_count > 0 && r.confidence >= 0.4) ||
+      // 3 observations alone (covers rules that only fire in autonomous/silent mode).
+      (r.observed_count >= 3 && r.confidence >= 0.4)
   );
 
   if (rules.length === 0) {
@@ -312,6 +340,33 @@ function runGc(): void {
   const demoted = demoteFrequentlyCorrectRules();
   console.log(`[consolidation:gc] Demoted ${demoted} frequently-corrected rules.`);
 
+  // Demote compiled skills with sustained poor success rate (< 60% over 5+ runs).
+  // Removes the stale skill so the rule falls back to vision on next fire, then
+  // re-compiles fresh steps once the rule re-earns enough signal.
+  const poorSkills = getDb().prepare(
+    "SELECT * FROM skills WHERE run_count >= 5 AND (CAST(success_count AS REAL) / run_count) < 0.6"
+  ).all() as Array<{ id: number; rule_id: number | null; success_count: number; run_count: number }>;
+
+  let skillsDemoted = 0;
+  for (const skill of poorSkills) {
+    console.log(
+      `[consolidation:gc] Demoting poor skill #${skill.id} ` +
+      `(${skill.success_count}/${skill.run_count} success rate)`
+    );
+    getDb().prepare("DELETE FROM skills WHERE id = ?").run(skill.id);
+    // Cap accept_count to 4 (one short of the 5-accept autonomous threshold)
+    // so the rule restarts supervised and must re-earn trust.
+    if (skill.rule_id) {
+      getDb().prepare(
+        "UPDATE rules SET accept_count = MIN(accept_count, 4) WHERE id = ?"
+      ).run(skill.rule_id);
+    }
+    skillsDemoted++;
+  }
+  if (skillsDemoted > 0) {
+    console.log(`[consolidation:gc] Demoted ${skillsDemoted} poor skill(s) — rules reset to supervised.`);
+  }
+
   const decayed = applyConfidenceDecay();
   console.log(`[consolidation:gc] Applied power-law decay to ${decayed} rules.`);
 
@@ -325,6 +380,59 @@ function runGc(): void {
   console.log(`[consolidation:gc] Pruned ${events} raw events, ${sessions} empty sessions (>90 days).`);
 
   writeBehaviourProfile();
+}
+
+// ─── Cross-session stitching ──────────────────────────────────────────────────
+// Groups sessions that share an app-family context within 24h.
+// Enables "research Monday → draft Tuesday" to be extracted as one workflow.
+
+const APP_FAMILIES: string[][] = [
+  ["mail", "gmail", "outlook", "spark", "superhuman"],
+  ["linkedin", "twitter", "slack", "discord", "teams"],
+  ["notion", "obsidian", "notes", "bear", "roam"],
+  ["vscode", "cursor", "xcode", "intellij", "pycharm", "vim"],
+  ["chrome", "safari", "firefox", "arc", "edge"],
+  ["figma", "sketch", "framer", "canva"],
+];
+
+function shareAppFamily(apps1: string, apps2: string): boolean {
+  const a1 = apps1.toLowerCase();
+  const a2 = apps2.toLowerCase();
+  return APP_FAMILIES.some(
+    (family) => family.some((k) => a1.includes(k)) && family.some((k) => a2.includes(k))
+  );
+}
+
+/** Group an array of sessions into stitched chains of related work. */
+export function stitchSessions(sessions: Session[]): Session[][] {
+  if (sessions.length === 0) return [];
+
+  const sorted = [...sessions].sort(
+    (a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime()
+  );
+
+  const groups: Session[][] = [];
+  let current: Session[] = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    const gapMs =
+      new Date(curr.started_at).getTime() -
+      new Date(prev.ended_at ?? prev.started_at).getTime();
+
+    const withinDay = gapMs <= 24 * 60 * 60 * 1000;
+    const sameFamily = shareAppFamily(prev.apps ?? "", curr.apps ?? "");
+
+    if (withinDay && sameFamily) {
+      current.push(curr);
+    } else {
+      groups.push(current);
+      current = [curr];
+    }
+  }
+  groups.push(current);
+  return groups;
 }
 
 // ─── Main entry ──────────────────────────────────────────────────────────────

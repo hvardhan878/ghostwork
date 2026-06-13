@@ -15,6 +15,7 @@ import * as path from "path";
 import * as os from "os";
 import { runDeterministicSteps } from "./stepRunner";
 import { beginExecution, endExecution, checkAbort, AbortedError } from "./abort";
+import { listElements, clickElement } from "./axDriver";
 
 const CHAT_URL = "https://openrouter.ai/api/v1/chat/completions";
 const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
@@ -765,8 +766,13 @@ async function executeAnthropicNative(
 ): Promise<ExecuteResult> {
   const systemPrompt = [
     "You are a macOS desktop automation agent acting on behalf of a user.",
-    "Take a screenshot first to see the current state, then complete the task efficiently.",
-    "Be precise with coordinates. Complete the task and stop.",
+    "PREFERRED APPROACH for native macOS apps (Notes, Mail, Calendar, Finder, etc.):",
+    "  1. Call ax_list_elements(app) to discover named buttons and fields in the window.",
+    "  2. Call ax_click_element(app, element) to click by name — reliable, no coordinate guessing.",
+    "  3. Only fall back to the computer tool's pixel coordinates for web content in browsers,",
+    "     or when ax_list_elements returns no results (app has no AX tree).",
+    "For browser tasks, use the computer tool's screenshot + click directly.",
+    "Take a screenshot first if you need to orient yourself. Complete the task and stop.",
     context ? `Current context: ${context}` : "",
   ]
     .filter(Boolean)
@@ -824,6 +830,35 @@ async function executeAnthropicNative(
               display_width_px: physW,
               display_height_px: physH,
             },
+            {
+              name: "ax_list_elements",
+              description:
+                "List named interactive elements (buttons, text fields) in the frontmost window " +
+                "of a macOS app via the accessibility tree. Call this BEFORE clicking to discover " +
+                "element names, then use ax_click_element by name instead of pixel coordinates.",
+              input_schema: {
+                type: "object",
+                properties: {
+                  app: { type: "string", description: "Exact macOS app display name (e.g. 'Notes', 'Mail')" },
+                },
+                required: ["app"],
+              },
+            },
+            {
+              name: "ax_click_element",
+              description:
+                "Click a named element in a macOS app via the accessibility tree. " +
+                "More reliable than pixel clicks for native apps. " +
+                "Falls through to pixel click if the element is not found.",
+              input_schema: {
+                type: "object",
+                properties: {
+                  app:     { type: "string", description: "Exact macOS app display name" },
+                  element: { type: "string", description: "Element name as returned by ax_list_elements" },
+                },
+                required: ["app", "element"],
+              },
+            },
           ],
           messages,
         }),
@@ -877,25 +912,65 @@ async function executeAnthropicNative(
 
     const toolResults: ContentBlock[] = [];
     for (const block of content) {
-      if (block.type !== "tool_use" || block.name !== "computer") continue;
-
-      const actionName = block.input.action;
-      const detail =
-        block.input.coordinate
-          ? `(${block.input.coordinate.join(",")})`
-          : block.input.text
-            ? `"${block.input.text.slice(0, 40)}"`
-            : "";
-
-      console.log(`[computer-use:anthropic] Step ${steps}: ${actionName} ${detail}`);
-      onStep?.(steps, actionName, detail);
+      if (block.type !== "tool_use") continue;
 
       let result: ToolResultContent[];
-      try {
-        result = executeComputerAction(block.input, scale);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        result = [{ type: "text", text: `Error: ${msg}` }];
+
+      if (block.name === "ax_list_elements") {
+        // AX tool: list named elements in the app's frontmost window.
+        const app = (block.input as unknown as { app: string }).app;
+        console.log(`[computer-use:anthropic] Step ${steps}: ax_list_elements app="${app}"`);
+        onStep?.(steps, "ax_list_elements", `app="${app}"`);
+        try {
+          const els = await listElements(app);
+          result = [{
+            type: "text",
+            text: els.length > 0
+              ? els.map((e) => `${e.role}: "${e.name}"`).join("\n")
+              : "No AX elements found — app may not support accessibility scripting.",
+          }];
+        } catch (err) {
+          result = [{ type: "text", text: `AX error: ${err instanceof Error ? err.message : String(err)}` }];
+        }
+
+      } else if (block.name === "ax_click_element") {
+        // AX tool: click a named element by accessibility name.
+        const { app, element } = block.input as unknown as { app: string; element: string };
+        console.log(`[computer-use:anthropic] Step ${steps}: ax_click_element app="${app}" element="${element}"`);
+        onStep?.(steps, "ax_click_element", `"${element}" in ${app}`);
+        try {
+          await clickElement(app, element);
+          const screenshot = takeScreenshot();
+          result = [
+            { type: "text", text: `Clicked "${element}" in ${app}` },
+            { type: "image", source: { type: "base64", media_type: "image/png", data: screenshot } },
+          ];
+        } catch (err) {
+          // Element not found via AX — inform Claude so it can fall back to pixel click.
+          result = [{ type: "text", text: `AX click failed: ${err instanceof Error ? err.message : String(err)}. Try using the computer tool with pixel coordinates instead.` }];
+        }
+
+      } else if (block.name === "computer") {
+        const actionName = block.input.action;
+        const detail =
+          block.input.coordinate
+            ? `(${block.input.coordinate.join(",")})`
+            : block.input.text
+              ? `"${block.input.text.slice(0, 40)}"`
+              : "";
+
+        console.log(`[computer-use:anthropic] Step ${steps}: ${actionName} ${detail}`);
+        onStep?.(steps, actionName, detail);
+
+        try {
+          result = executeComputerAction(block.input, scale);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          result = [{ type: "text", text: `Error: ${msg}` }];
+        }
+      } else {
+        // Unknown tool — return an error so the loop doesn't hang.
+        result = [{ type: "text", text: `Unknown tool: ${block.name}` }];
       }
 
       toolResults.push({
