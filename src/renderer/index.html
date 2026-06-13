@@ -461,7 +461,21 @@
     <div class="scroll">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
         <div class="section-title" style="margin-bottom:0">Timeline</div>
-        <span style="font-size:11px;color:var(--text-muted)">Last 7 days · every interaction across all apps</span>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="font-size:11px;color:var(--text-muted)">Last 7 days · every interaction across all apps</span>
+          <button id="btn-tl-debug" class="btn-ghost"
+            style="font-size:10px;padding:3px 8px;"
+            onclick="runTimelineDebug()">Debug</button>
+        </div>
+      </div>
+      <!-- Debug panel (hidden by default) -->
+      <div id="tl-debug-panel" style="display:none;margin-bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;">
+        <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;">Raw Screenpipe sample</span>
+          <button onclick="document.getElementById('tl-debug-panel').style.display='none'"
+            style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;padding:0 2px;">×</button>
+        </div>
+        <div id="tl-debug-content" style="padding:10px 12px;font-size:10px;font-family:var(--mono);color:var(--text-muted);white-space:pre-wrap;max-height:260px;overflow-y:auto;line-height:1.5;"></div>
       </div>
       <div id="timeline-list">
         <div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading sessions…</div>
@@ -1566,6 +1580,33 @@ api.on('receipt:ready', loadReceipt);
 // ── Timeline ─────────────────────────────────────────────────────────────────
 let tlExpandedSession = null;
 
+async function runTimelineDebug() {
+  const panel = document.getElementById('tl-debug-panel');
+  const content = document.getElementById('tl-debug-content');
+  panel.style.display = 'block';
+  content.textContent = 'Fetching…';
+  try {
+    const [inputRes, uiRes] = await Promise.all([
+      api.debug.screenpipeRaw('input'),
+      api.debug.screenpipeRaw('ui'),
+    ]);
+    const out = [
+      '=== content_type=input ===',
+      inputRes.ok
+        ? JSON.stringify(inputRes.sample, null, 2)
+        : 'ERROR: ' + inputRes.error,
+      '',
+      '=== content_type=ui ===',
+      uiRes.ok
+        ? JSON.stringify(uiRes.sample, null, 2)
+        : 'ERROR: ' + uiRes.error,
+    ].join('\n');
+    content.textContent = out;
+  } catch(e) {
+    content.textContent = 'Error: ' + String(e);
+  }
+}
+
 function fmtDate(ts) {
   try {
     const d = new Date(ts);
@@ -1633,13 +1674,30 @@ async function toggleSessionEvents(sid, card) {
       evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:11px;">No events stored for this session.</div>';
     } else {
       const rows = events.map(e => {
-        const label = e.element_name ? `"${e.element_name.slice(0,50)}"` : (e.url ? e.url.slice(0,50) : '');
-        const value = e.value ? ` = "${e.value.slice(0,40)}"` : '';
-        return `<div style="padding:3px 14px;display:flex;gap:8px;align-items:baseline;border-bottom:1px solid var(--border);">
-          <span style="font-size:10px;color:var(--text-dim);flex-shrink:0;width:50px;">${fmtTime(e.ts)}</span>
-          <span style="font-size:11px;color:var(--amber);flex-shrink:0;width:60px;">${esc(e.type)}</span>
-          <span style="font-size:11px;color:var(--text);flex-shrink:0;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(e.app)}</span>
-          <span style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(label)}${esc(value)}</span>
+        // Primary label: element name > browser URL > window name > coordinates
+        const label = e.element_name
+          ? e.element_name.slice(0, 60)
+          : e.url
+            ? e.url.replace(/^https?:\/\//, '').slice(0, 60)
+            : e.window_name
+              ? e.window_name.slice(0, 60)
+              : (e.element_role ? '' : `(${e.type})`);
+
+        // Secondary: role badge + typed value
+        const roleBadge = e.element_role
+          ? `<span style="font-size:9px;color:var(--text-dim);background:var(--border);
+               border-radius:3px;padding:1px 4px;flex-shrink:0;">${esc(e.element_role.replace('AX',''))}</span>`
+          : '';
+        const valueStr = e.value && !e.value.startsWith('key:')
+          ? `<span style="color:var(--green);margin-left:4px;">"${esc(e.value.slice(0,40))}"</span>` : '';
+        const keyStr = e.value && e.value.startsWith('key:')
+          ? `<span style="color:var(--blue);margin-left:4px;">${esc(e.value.slice(4))}</span>` : '';
+
+        return `<div style="padding:4px 14px;display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--border);">
+          <span style="font-size:10px;color:var(--text-dim);flex-shrink:0;width:46px;">${fmtTime(e.ts)}</span>
+          <span style="font-size:10px;font-weight:600;color:var(--amber);flex-shrink:0;width:52px;text-transform:uppercase;letter-spacing:.02em;">${esc(e.type)}</span>
+          <span style="font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${esc(label)}${valueStr}${keyStr}</span>
+          ${roleBadge}
         </div>`;
       }).join('');
       evContainer.innerHTML = `<div style="max-height:220px;overflow-y:auto;">${rows}</div>`;

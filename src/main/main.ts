@@ -458,6 +458,19 @@ function registerIpcHandlers(): void {
     return { ok: true };
   });
 
+  // ── Debug: inspect raw Screenpipe DB events ──
+  ipcMain.handle("debug:screenpipe-raw", async (_e, _contentType: string) => {
+    const { queryUiEvents } = await import("./screenpipeDb");
+    const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const until = new Date().toISOString();
+    try {
+      const events = queryUiEvents(since, until, 5);
+      return { ok: true, sample: events };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  });
+
   // ── Kill switch (renderer-side stop button) ──
   ipcMain.handle("execute:abort", () => {
     requestAbort();

@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld("ghostwork", {
     refresh: () => ipcRenderer.invoke("profile:refresh"),
   },
 
+  debug: {
+    screenpipeRaw: (type: string) => ipcRenderer.invoke("debug:screenpipe-raw", type),
+  },
+
   db: {
     workflows: () => ipcRenderer.invoke("db:workflows"),
     rulesForWorkflow: (id: number) =>
@@ -113,6 +117,7 @@ contextBridge.exposeInMainWorld("ghostwork", {
       "approvals:updated",
       "teach:status",
       "receipt:ready",
+      "timeline:updated",
     ];
     if (allowed.includes(channel)) {
       ipcRenderer.on(channel, (_event, ...args) => fn(...args));

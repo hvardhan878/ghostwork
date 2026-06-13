@@ -87,15 +87,24 @@ export type InputEventType =
 
 export interface InputEvent {
   type: InputEventType;
+  /** App name — may be empty; Screenpipe doesn't always populate this */
   app_name: string;
   window_name: string;
   timestamp: string;
-  /** Typed text, clipboard content, or key name */
+  /** AX element label (e.g. "Connect button", "Search field") */
+  element_name?: string;
+  /** AX element role (e.g. "AXButton", "AXTextField") */
+  element_role?: string;
+  /** Typed text, clipboard content, text_content, or key char */
   text?: string;
+  /** Key code (keyboard events) */
+  key_code?: number;
   /** Mouse click X coordinate */
   x?: number;
   /** Mouse click Y coordinate */
   y?: number;
+  /** Browser URL if captured */
+  browser_url?: string;
   /** Raw content blob from Screenpipe */
   content?: Record<string, unknown>;
 }
@@ -247,19 +256,45 @@ export async function getInputEvents(
     });
 
     return result.data.map((item) => {
+      // Actual Screenpipe input event schema (as of 2026):
+      // content.event_type: "click" | "key" | "scroll" | ...
+      // content.element_name: AX label (e.g. "Connect button") — may be null
+      // content.element_role: AX role (e.g. "AXButton") — may be null
+      // content.app_name: null (not populated by Screenpipe)
+      // content.window_title: null (not populated by Screenpipe)
+      // content.browser_url: populated when inside a browser
+      // content.key_code: for keyboard events
+      // content.text_content: typed / pasted text
+      // content.x, content.y: mouse coordinates
       const c = (item.content ?? {}) as Record<string, unknown>;
-      const type = (
-        (c.event_type ?? c.type ?? item.type ?? "key") as string
-      ).toLowerCase() as InputEventType;
+
+      const rawType = String(c.event_type ?? c.type ?? item.type ?? "key").toLowerCase();
+
+      const elementName = (c.element_name ?? null) as string | null;
+      const elementRole = (c.element_role ?? null) as string | null;
+      const browserUrl = (c.browser_url ?? null) as string | null;
+      const keyCode = (c.key_code ?? null) as number | null;
+      const textContent = (c.text_content ?? c.text ?? c.key_char ?? item.text ?? null) as string | null;
+      const x = (c.x ?? null) as number | null;
+      const y = (c.y ?? null) as number | null;
+
+      // App name: Screenpipe's input stream doesn't record this — will be empty.
+      // Use element_role as a hint for filtering (e.g. skip AXScrollArea noise).
+      const appName = String(c.app_name ?? item.app_name ?? "");
+      const windowName = String(c.window_title ?? c.window_name ?? item.window_name ?? "");
 
       return {
-        type: normaliseInputType(type),
-        app_name: item.app_name ?? "",
-        window_name: item.window_name ?? "",
+        type: normaliseInputType(rawType),
+        app_name: appName,
+        window_name: windowName,
+        element_name: elementName ?? undefined,
+        element_role: elementRole ?? undefined,
         timestamp: item.timestamp,
-        text: (c.text ?? c.key_char ?? item.text ?? "") as string | undefined,
-        x: c.x as number | undefined,
-        y: c.y as number | undefined,
+        text: textContent ?? undefined,
+        key_code: keyCode ?? undefined,
+        x: x ?? undefined,
+        y: y ?? undefined,
+        browser_url: browserUrl ?? undefined,
         content: item.content,
       };
     });
@@ -279,37 +314,17 @@ function normaliseInputType(raw: string): InputEventType {
 }
 
 /**
- * Fetch accessibility tree events — UI element snapshots (buttons, labels,
- * fields) captured by Screenpipe's accessibility layer for the given window.
+ * Fetch accessibility tree events from Screenpipe.
+ * Note: content_type=ui returns HTTP 400 in current Screenpipe builds.
+ * The accessibility data is already embedded in input events via
+ * element_name and element_role fields. This function is a no-op stub
+ * kept for forward compatibility when Screenpipe adds UI stream support.
  */
 export async function getAccessibilityEvents(
-  sinceIso: string,
-  untilIso: string,
-  appName?: string,
-  limit = 100
+  _sinceIso: string,
+  _untilIso: string,
+  _appName?: string,
+  _limit = 100
 ): Promise<AccessibilityEvent[]> {
-  try {
-    const result = await searchContent({
-      content_type: "accessibility",
-      start_time: sinceIso,
-      end_time: untilIso,
-      app_name: appName,
-      limit,
-    });
-
-    return result.data.map((item) => {
-      const c = (item.content ?? {}) as Record<string, unknown>;
-      return {
-        app_name: item.app_name ?? "",
-        window_name: item.window_name ?? "",
-        timestamp: item.timestamp,
-        text: (c.text ?? item.text ?? "") as string,
-        role: c.role as string | undefined,
-        browser_url: c.browser_url as string | undefined,
-        content: item.content,
-      };
-    });
-  } catch {
-    return [];
-  }
+  return [];
 }
