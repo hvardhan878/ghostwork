@@ -1,6 +1,6 @@
 # Ghostwork
 
-[![Discord](https://img.shields.io/discord/1515405522122178620?logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/HxhDfs4H39)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/HxhDfs4H39)
 
 > **The first agent you don't prompt.**
 
