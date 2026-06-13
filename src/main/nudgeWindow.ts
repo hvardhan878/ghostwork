@@ -12,6 +12,10 @@ export interface NudgePayload {
   action: string;
   instruction: string;
   condition: string;
+  /** How many times this pattern has been observed */
+  evidenceCount?: number;
+  /** Preview of the first 2–3 steps the automation will take */
+  stepPreview?: string[];
   onDoIt: () => void | Promise<void>;
   onDismiss: () => void;
 }
@@ -34,7 +38,8 @@ export function showNudgeWindow(payload: NudgePayload): void {
   currentPayload = payload;
 
   const winW = 340;
-  const winH = 130;
+  const hasPreview = (payload.stepPreview?.length ?? 0) > 0 || payload.evidenceCount !== undefined;
+  const winH = hasPreview ? 190 : 130;
 
   // Accessory apps (dock hidden) often fail to surface overlay windows on macOS.
   if (process.platform === "darwin") {
@@ -75,9 +80,17 @@ export function showNudgeWindow(payload: NudgePayload): void {
     console.error(`[nudge] Failed to load: ${code} ${desc}`);
   });
 
-  nudgeWindow.loadFile(htmlPath, {
-    query: { action: payload.action.slice(0, 200) },
-  });
+  const query: Record<string, string> = {
+    action: payload.action.slice(0, 200),
+  };
+  if (payload.evidenceCount !== undefined) {
+    query.evidenceCount = String(payload.evidenceCount);
+  }
+  if (payload.stepPreview && payload.stepPreview.length > 0) {
+    query.steps = payload.stepPreview.slice(0, 3).join("|||");
+  }
+
+  nudgeWindow.loadFile(htmlPath, { query });
 
   const reveal = () => {
     if (!nudgeWindow || nudgeWindow.isDestroyed()) return;

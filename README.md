@@ -1,97 +1,166 @@
 # Ghostwork
 
-A macOS background agent that watches what you do, learns recurring workflows, and can take real actions on your screen when it recognizes a familiar situation.
+> **The first agent you don't prompt.**
 
-Ghostwork runs in the menu bar. It observes activity through [Screenpipe](https://github.com/mediar-ai/screenpipe), builds a local model of your habits, and uses Claude (via [OpenRouter](https://openrouter.ai)) to suggest or execute actions with computer use — mouse, keyboard, and screenshots.
+Ghostwork runs silently in the background, learns how you work from observation alone, and gradually takes repetitive tasks off your hands — without you ever writing a prompt or setting up an integration.
 
-## How it works
+---
 
-```
-Screen activity (Screenpipe)
-        ↓
-Hourly pattern extraction (Claude via OpenRouter)
-        ↓
-Local SQLite model (workflows + rules + confidence scores)
-        ↓
-Action engine polls every 10s → matches current context to rules
-        ↓
-Computer use executor (screenshots, clicks, typing on your Mac)
-```
+## What it does
 
-**Learn.** Every hour, Ghostwork pulls recent screen activity from Screenpipe, strips obvious PII (emails, phone numbers, etc.), and asks Claude to extract workflows and rules. These are stored locally in SQLite — nothing leaves your machine except the anonymized prompts sent to OpenRouter.
+Ghostwork watches every interaction across every app on your Mac (via [Screenpipe](https://github.com/mediar-ai/screenpipe)), builds a rich memory of your work patterns, and surfaces automations the moment they're relevant.
 
-**Match.** The action engine checks your current context against learned rules every 10 seconds. Each rule has a confidence score that determines behavior:
+### Memory layers
 
-| Confidence | Tier | Behavior |
-|------------|------|----------|
-| &lt; 0.6 | Suggest | Show in the sidebar; you decide |
-| 0.6 – 0.85 | Supervised | Act, then ask you to confirm or undo |
-| &gt; 0.85 | Autonomous | Act silently and log to the activity feed |
+| Layer | What's stored | How it's built |
+|-------|--------------|----------------|
+| **L1 Working** | Current screen context (app, URL, OCR) | Live, polled every 10 s |
+| **L2 Episodic** | Raw interactions: clicks, keys, navigations, app switches | Ingested every 2 min from Screenpipe's input stream |
+| **L3 Semantic** | Workflows and rules: *"WHEN on LinkedIn search → DO export to CRM"* | Promoted nightly from episodic memory via LLM |
+| **L4 Procedural** | Executable skills with step-by-step DOM/AX locators | Promoted nightly from stable semantic rules |
 
-**Act.** When a rule fires, Ghostwork calls Claude with the computer-use tool. Claude sees a screenshot, returns actions (click, type, scroll, etc.), and Ghostwork executes them locally using macOS APIs — `screencapture`, Quartz CoreGraphics for mouse events, and AppleScript for keyboard input.
+### Nightly consolidation (sleep cycle)
 
-## Requirements
+Every night Ghostwork runs a 3-phase consolidation:
 
-- **macOS** (Apple Silicon or Intel)
-- **Node.js** 18+
-- **[Screenpipe](https://github.com/mediar-ai/screenpipe)** — Ghostwork can launch and manage it automatically, or you can run it yourself
-- **OpenRouter API key** — used for pattern extraction and computer-use actions ([get one here](https://openrouter.ai/keys))
+1. **NREM** — LLM analyses unsummarised sessions and promotes patterns to rules  
+2. **REM** — Rules with 3+ observations that have browser-recorded events are compiled into executable skills  
+3. **GC** — Power-law confidence decay, dedup, 90-day prune of raw events, `behaviour.md` rewrite
 
-Ghostwork also needs macOS permissions for screen recording and accessibility (for mouse/keyboard control). You will be prompted on first use.
+The living `behaviour.md` profile is injected into every LLM prompt, so the trigger decision has full context about who you are and what you do.
+
+---
+
+## Execution tiers
+
+Ghostwork earns autonomy, never assumes it:
+
+| Tier | Behaviour |
+|------|-----------|
+| **Suggest** | Nudge popup — you decide |
+| **Supervised** | Executes but shows each step |
+| **Autonomous** | Runs silently; you see a receipt |
+
+Actions that are externally visible (send email, submit form, post) always require one-tap approval regardless of tier.
+
+---
+
+## Execution stack
+
+1. **Compiled skill replay** — zero-token deterministic replay using ranked DOM/AX locators  
+2. **CDP plan-then-execute** — Playwright CDP on a dedicated Chrome profile; LLM plans steps from live AX tree  
+3. **Native AX control** — AppleScript + `AXUIElement` for non-browser apps  
+4. **Pixel fallback** — Vision + function calling via OpenRouter when no structured tree is available
+
+Self-healing: when a locator breaks, Ghostwork re-extracts from the live DOM and promotes the new locator automatically.
+
+---
+
+## UI
+
+- **Menu bar icon** — reflects current state: observing / noticed / working / recording  
+- **Activity feed** — chronological log of every suggestion and action  
+- **Timeline tab** — drill down into every recorded session; save any session as a skill  
+- **Behaviour tab** — learned workflows, high-confidence rules, and session-derived patterns  
+- **Nudge popup** — appears above any app; shows evidence count and step preview before you confirm
+
+---
 
 ## Setup
 
+### Prerequisites
+
+- macOS 12+
+- [Screenpipe](https://github.com/mediar-ai/screenpipe) installed and running (`screenpipe`)
+- Node.js 20+ and npm
+- An [OpenRouter](https://openrouter.ai) API key (or Anthropic key)
+
+### Install
+
 ```bash
-git clone https://github.com/hvardhan878/ghostwork.git
+git clone https://github.com/your-org/ghostwork
 cd ghostwork
 npm install
+npx @electron/rebuild -f -w better-sqlite3
+```
+
+### Configure
+
+```bash
 cp .env.example .env
-# Edit .env and add your OpenRouter API key
-npm start
 ```
 
-The app opens as a menu-bar utility. Click the tray icon to open the main window.
+Edit `.env`:
 
-## Demo data
-
-On first launch, Ghostwork seeds **one example workflow** so you can see what learned behavior looks like before it has observed you. Demo items are clearly marked with a **Demo** badge in the UI and in the Learned Workflows list.
-
-You can also run a **live demo** from the home screen — it opens Calculator via Spotlight and types `2+2=` so you can watch Ghostwork take a real action on your screen. This requires a valid OpenRouter API key.
-
-Use **Wipe all data** in Settings to remove demo and learned data and start fresh.
-
-## Project structure
-
-```
-src/
-  main/
-    main.ts            — Electron app, tray, IPC, scheduled jobs
-    screenpipe.ts      — Screenpipe API client
-    screenpipeManager.ts — launches/manages Screenpipe process
-    extractor.ts       — hourly workflow extraction from activity
-    consolidation.ts — nightly cleanup of the behaviour model
-    actionEngine.ts    — polls context and triggers rules
-    computerUse.ts     — Claude computer-use loop + local execution
-    db.ts              — SQLite storage for workflows, rules, activity
-    demo.ts            — seeds the example workflow on first launch
-  renderer/
-    index.html         — UI (activity feed, workflows, settings)
+```env
+OPENROUTER_API_KEY=sk-or-...
+ANTHROPIC_API_KEY=sk-ant-...   # optional, used for native computer use
 ```
 
-## Scripts
+### Run
 
-| Command | Description |
-|---------|-------------|
-| `npm start` | Build TypeScript and launch Electron |
-| `npm run dev` | Same as start, with Node inspector enabled |
-| `npm run build` | Compile TypeScript to `dist/` |
+```bash
+npm start          # development (hot reload)
+npm run build      # production build
+npm run dist       # package as .dmg
+```
+
+---
+
+## Architecture
+
+```
+Screenpipe ──► sessionIngester ──► raw_events ──► NREM ──► rules ──► REM ──► skills
+                                                    ↓                  ↓
+                                              behaviour.md      skill replay
+                                                    ↓
+                              actionEngine ──► trigger decision ──► nudge / execute
+```
+
+Key files:
+
+| File | Responsibility |
+|------|----------------|
+| `sessionIngester.ts` | Polls Screenpipe input stream every 2 min; stitches events into sessions |
+| `consolidation.ts` | Nightly NREM/REM/GC cycle |
+| `behaviourProfile.ts` | Writes `behaviour.md`; read by all LLM prompts |
+| `browserDriver.ts` | CDP connection to dedicated Chrome profile; ranked locators |
+| `skillEngine.ts` | Compile (plan-then-execute) and replay (deterministic) |
+| `axDriver.ts` | macOS native app control via AXUIElement |
+| `actionEngine.ts` | Perception loop + LLM trigger decision |
+| `extractor.ts` | Hourly Screenpipe OCR extraction fallback |
+| `db.ts` | SQLite schema: workflows, rules, skills, sessions, raw_events |
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and coding guidelines.
+
+Open issues on GitHub — look for `good first issue` labels.
+
+---
 
 ## Privacy
 
-- Activity data comes from Screenpipe and stays local except for anonymized excerpts sent to OpenRouter during extraction and action execution.
-- PII patterns (email, phone, credit card) are redacted before any LLM call.
-- You can exclude specific apps from observation in Settings.
+- All data stays on your device. No cloud sync, no telemetry.
+- Ghostwork excludes itself, Cursor, and any app you add to the exclusion list.
+- Raw events are pruned after 90 days.
+- PII (emails, phone numbers, card numbers) is stripped before any LLM call.
+- The `behaviour.md` profile never leaves your machine.
 
-## License
+---
 
-This project is licensed under the [GNU General Public License v3.0 or later](https://www.gnu.org/licenses/gpl-3.0.html). You may use, modify, and redistribute it freely — including commercially — as long as derivative works remain open source under the same license. See [LICENSE](LICENSE) for full terms.
+## Roadmap
+
+- [ ] Full autopilot mode: skill execution without any prompt
+- [ ] Cross-session pattern detection in REM phase
+- [ ] Browser extension for richer DOM locators in user's main Chrome profile
+- [ ] Windows support (via Screenpipe Windows builds)
+- [ ] Team profiles (opt-in, anonymised)
+
+---
+
+## Licence
+
+MIT

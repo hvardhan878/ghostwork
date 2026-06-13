@@ -74,6 +74,9 @@ import { computeReceipt, receiptSummaryLine } from "./receipt";
 import { syncSkillSchedules, stopSkillSchedules } from "./skillScheduler";
 import { registerGhostStateSetter, GhostState } from "./ghostState";
 import { requestAbort } from "./abort";
+import { startSessionIngester, stopSessionIngester } from "./sessionIngester";
+import { getRecentSessions, getRawEventsForSession } from "./db";
+import { writeBehaviourProfile } from "./behaviourProfile";
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -433,6 +436,28 @@ function registerIpcHandlers(): void {
   // ── Weekly receipt ──
   ipcMain.handle("receipt:get", (_e, days: number = 7) => computeReceipt(days));
 
+  // ── Timeline (episodic memory) ──
+  ipcMain.handle("timeline:sessions", (_e, days: number = 7) => {
+    return getRecentSessions(days);
+  });
+
+  ipcMain.handle("timeline:events", (_e, sessionId: number) => {
+    return getRawEventsForSession(sessionId);
+  });
+
+  ipcMain.handle("timeline:save-as-skill", async (_e, sessionId: number) => {
+    const { runExtractionJob } = await import("./extractor");
+    await runExtractionJob();
+    mainWindow?.webContents.send("model:updated");
+    return { ok: true };
+  });
+
+  // ── Behaviour profile ──
+  ipcMain.handle("profile:refresh", () => {
+    writeBehaviourProfile();
+    return { ok: true };
+  });
+
   // ── Kill switch (renderer-side stop button) ──
   ipcMain.handle("execute:abort", () => {
     requestAbort();
@@ -644,6 +669,9 @@ app.whenReady().then(async () => {
   // Start Screenpipe daemon and inject its auth token before any /search calls.
   await initScreenpipeManager(() => mainWindow);
 
+  // Start episodic memory ingestion — polls Screenpipe input stream every 2min.
+  startSessionIngester();
+
   startActionEngine(() => mainWindow);
 
   // Arm scheduled skills and surface approval-queue changes to the UI.
@@ -682,6 +710,7 @@ app.on("window-all-closed", () => { /* stay alive in tray */ });
 app.on("before-quit", () => {
   globalShortcut.unregisterAll();
   stopActionEngine();
+  stopSessionIngester();
   stopSkillSchedules();
   stopScreenpipeManager();
   mainWindow?.removeAllListeners("close");

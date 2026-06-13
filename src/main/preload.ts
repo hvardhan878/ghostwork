@@ -49,6 +49,16 @@ contextBridge.exposeInMainWorld("ghostwork", {
     get: (days?: number) => ipcRenderer.invoke("receipt:get", days ?? 7),
   },
 
+  timeline: {
+    sessions: (days?: number) => ipcRenderer.invoke("timeline:sessions", days ?? 7),
+    events: (sessionId: number) => ipcRenderer.invoke("timeline:events", sessionId),
+    saveAsSkill: (sessionId: number) => ipcRenderer.invoke("timeline:save-as-skill", sessionId),
+  },
+
+  profile: {
+    refresh: () => ipcRenderer.invoke("profile:refresh"),
+  },
+
   db: {
     workflows: () => ipcRenderer.invoke("db:workflows"),
     rulesForWorkflow: (id: number) =>

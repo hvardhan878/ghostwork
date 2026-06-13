@@ -388,6 +388,7 @@
   <div class="titlebar">
     <nav class="nav">
       <button class="nav-btn active" data-view="feed">Activity</button>
+      <button class="nav-btn" data-view="timeline">Timeline</button>
       <button class="nav-btn" data-view="model">Behaviour</button>
       <button class="nav-btn" data-view="settings">Settings</button>
     </nav>
@@ -451,6 +452,19 @@
         <div class="sidebar-content" id="sidebar-suggestions">
           <div class="sidebar-empty">No pending suggestions</div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Timeline view ────────────────────────────────────────────────── -->
+  <div class="view" id="view-timeline">
+    <div class="scroll">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div class="section-title" style="margin-bottom:0">Timeline</div>
+        <span style="font-size:11px;color:var(--text-muted)">Last 7 days · every interaction across all apps</span>
+      </div>
+      <div id="timeline-list">
+        <div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading sessions…</div>
       </div>
     </div>
   </div>
@@ -522,6 +536,17 @@
       <div id="skills-section" style="display:none;margin-bottom:20px;">
         <div class="section-title" style="font-size:12px;">Skills (compiled &amp; taught)</div>
         <div id="skills-list"></div>
+      </div>
+
+      <!-- From recordings: session-derived workflows -->
+      <div id="recordings-section" style="margin-bottom:20px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+          <div class="section-title" style="font-size:12px;margin-bottom:0;">From recordings</div>
+          <span style="font-size:11px;color:var(--text-muted)">Patterns detected in your sessions</span>
+        </div>
+        <div id="recordings-list">
+          <div style="font-size:12px;color:var(--text-dim);padding:8px 0;">No recorded sessions yet — Ghostwork will detect patterns as you work.</div>
+        </div>
       </div>
 
       <div id="model-list" class="model-list">
@@ -688,8 +713,9 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('view-' + view).classList.add('active');
-    if (view === 'model') { loadModel(); loadSkills(); loadApprovals(); loadReceipt(); }
+    if (view === 'model') { loadModel(); loadSkills(); loadApprovals(); loadReceipt(); loadRecordings(); }
     if (view === 'settings') loadSettings();
+    if (view === 'timeline') loadTimeline();
   });
 });
 
@@ -1536,6 +1562,139 @@ async function loadReceipt() {
 }
 
 api.on('receipt:ready', loadReceipt);
+
+// ── Timeline ─────────────────────────────────────────────────────────────────
+let tlExpandedSession = null;
+
+function fmtDate(ts) {
+  try {
+    const d = new Date(ts);
+    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) +
+      ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  } catch { return ts; }
+}
+
+async function loadTimeline() {
+  const list = document.getElementById('timeline-list');
+  if (!list) return;
+  list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading…</div>';
+  try {
+    const sessions = await api.timeline.sessions(7);
+    if (!sessions || sessions.length === 0) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:20px 0;">No sessions recorded yet.<br>Ghostwork will start capturing your interactions automatically.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const s of sessions) {
+      const apps = (() => { try { return JSON.parse(s.apps); } catch { return [s.app || '?']; } })();
+      const appStr = apps.slice(0, 4).join(', ') + (apps.length > 4 ? ` +${apps.length - 4}` : '');
+      const card = document.createElement('div');
+      card.style.cssText = 'margin-bottom:8px;border:1px solid var(--border);border-radius:8px;overflow:hidden;';
+      card.innerHTML = `
+        <div style="padding:10px 14px;background:var(--surface);display:flex;align-items:center;gap:10px;cursor:pointer;"
+             onclick="toggleSessionEvents(${s.id}, this.parentElement)">
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:12px;color:var(--text);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(appStr)}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">${fmtDate(s.started_at)} · ${s.event_count} events${s.summary && s.summary !== 'too_short' && s.summary !== 'no_pattern' ? ' · <em style="color:var(--amber)">' + esc(s.summary) + '</em>' : ''}</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+            <button onclick="event.stopPropagation();saveSessionAsSkill(${s.id},this)"
+              style="font-size:11px;padding:3px 10px;border-radius:5px;border:1px solid var(--border);
+                     background:none;color:var(--text-muted);cursor:pointer;font-family:var(--font);">
+              Save as skill
+            </button>
+            <span style="font-size:10px;color:var(--text-dim);">▸</span>
+          </div>
+        </div>
+        <div class="session-events" style="display:none;" data-sid="${s.id}"></div>`;
+      list.appendChild(card);
+    }
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">Error loading timeline: ' + esc(String(e)) + '</div>';
+  }
+}
+
+async function toggleSessionEvents(sid, card) {
+  const evContainer = card.querySelector('.session-events');
+  if (!evContainer) return;
+  if (evContainer.style.display !== 'none') {
+    evContainer.style.display = 'none';
+    return;
+  }
+  if (evContainer.dataset.loaded) {
+    evContainer.style.display = 'block';
+    return;
+  }
+  evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-muted);font-size:11px;">Loading events…</div>';
+  evContainer.style.display = 'block';
+  try {
+    const events = await api.timeline.events(sid);
+    if (!events || events.length === 0) {
+      evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-dim);font-size:11px;">No events stored for this session.</div>';
+    } else {
+      const rows = events.map(e => {
+        const label = e.element_name ? `"${e.element_name.slice(0,50)}"` : (e.url ? e.url.slice(0,50) : '');
+        const value = e.value ? ` = "${e.value.slice(0,40)}"` : '';
+        return `<div style="padding:3px 14px;display:flex;gap:8px;align-items:baseline;border-bottom:1px solid var(--border);">
+          <span style="font-size:10px;color:var(--text-dim);flex-shrink:0;width:50px;">${fmtTime(e.ts)}</span>
+          <span style="font-size:11px;color:var(--amber);flex-shrink:0;width:60px;">${esc(e.type)}</span>
+          <span style="font-size:11px;color:var(--text);flex-shrink:0;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(e.app)}</span>
+          <span style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(label)}${esc(value)}</span>
+        </div>`;
+      }).join('');
+      evContainer.innerHTML = `<div style="max-height:220px;overflow-y:auto;">${rows}</div>`;
+    }
+    evContainer.dataset.loaded = '1';
+  } catch(e) {
+    evContainer.innerHTML = '<div style="padding:10px 14px;color:var(--text-muted);font-size:11px;">Error: ' + esc(String(e)) + '</div>';
+  }
+}
+
+async function saveSessionAsSkill(sid, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    await api.timeline.saveAsSkill(sid);
+    btn.textContent = 'Saved ✓';
+  } catch {
+    btn.textContent = 'Error';
+    btn.disabled = false;
+  }
+}
+
+// ── From recordings (Behaviour tab) ──────────────────────────────────────────
+async function loadRecordings() {
+  const list = document.getElementById('recordings-list');
+  if (!list) return;
+  try {
+    const sessions = await api.timeline.sessions(30);
+    if (!sessions || sessions.length === 0) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:8px 0;">No recorded sessions yet — Ghostwork will detect patterns as you work.</div>';
+      return;
+    }
+    // Group by summary (workflow name derived from NREM analysis)
+    const byPattern = {};
+    for (const s of sessions) {
+      if (!s.summary || s.summary === 'too_short' || s.summary === 'no_pattern') continue;
+      if (!byPattern[s.summary]) byPattern[s.summary] = { name: s.summary, count: 0, lastSeen: s.started_at };
+      byPattern[s.summary].count++;
+      if (s.started_at > byPattern[s.summary].lastSeen) byPattern[s.summary].lastSeen = s.started_at;
+    }
+    const patterns = Object.values(byPattern).sort((a, b) => b.count - a.count);
+    if (patterns.length === 0) {
+      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:8px 0;">Sessions captured but no patterns extracted yet — check back after the nightly consolidation.</div>';
+      return;
+    }
+    list.innerHTML = patterns.map(p => `
+      <div style="display:flex;align-items:center;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;margin-bottom:6px;gap:10px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12px;color:var(--text);font-weight:500;">${esc(p.name)}</div>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Last seen ${fmtDate(p.lastSeen)}</div>
+        </div>
+        <span style="font-size:11px;color:var(--amber);background:#1a1200;border:1px solid #3a2800;padding:2px 8px;border-radius:10px;flex-shrink:0;">${p.count}× seen</span>
+      </div>`).join('');
+  } catch(e) { console.error('recordings load error', e); }
+}
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadFeed();

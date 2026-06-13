@@ -1,6 +1,11 @@
 /**
  * Screenpipe client — wraps the local REST API at localhost:3030.
  * Never builds its own capture layer; all screen data comes from Screenpipe.
+ *
+ * Screenpipe captures three streams:
+ *   vision/ocr  — what is visible on screen (text via AX tree + OCR fallback)
+ *   input       — every click, keystroke, app switch, clipboard, scroll
+ *   accessibility — UI element tree snapshots (buttons, fields, labels)
  */
 
 const SCREENPIPE_BASE = "http://localhost:3030";
@@ -64,9 +69,50 @@ export interface SearchParams {
   start_time?: string;
   end_time?: string;
   app_name?: string;
-  content_type?: "ocr" | "audio" | "ui";
+  content_type?: "ocr" | "audio" | "ui" | "input" | "accessibility" | "all";
   query?: string;
+  browser_url?: string;
   excluded_apps?: string[];
+}
+
+// ─── Input event types (content_type=input) ──────────────────────────────────
+
+export type InputEventType =
+  | "click"
+  | "key"
+  | "app_switch"
+  | "window_focus"
+  | "clipboard"
+  | "scroll";
+
+export interface InputEvent {
+  type: InputEventType;
+  app_name: string;
+  window_name: string;
+  timestamp: string;
+  /** Typed text, clipboard content, or key name */
+  text?: string;
+  /** Mouse click X coordinate */
+  x?: number;
+  /** Mouse click Y coordinate */
+  y?: number;
+  /** Raw content blob from Screenpipe */
+  content?: Record<string, unknown>;
+}
+
+// ─── Accessibility event types (content_type=accessibility) ──────────────────
+
+export interface AccessibilityEvent {
+  app_name: string;
+  window_name: string;
+  timestamp: string;
+  /** Visible text from the element or its label */
+  text: string;
+  /** ARIA/AX role e.g. button, textfield, link */
+  role?: string;
+  /** Browser URL if captured inside a browser */
+  browser_url?: string;
+  content?: Record<string, unknown>;
 }
 
 /** Check whether Screenpipe is reachable */
@@ -116,6 +162,7 @@ export async function searchContent(
   if (rest.app_name) query.set("app_name", rest.app_name);
   if (rest.content_type) query.set("content_type", rest.content_type);
   if (rest.query) query.set("q", rest.query);
+  if (rest.browser_url) query.set("browser_url", rest.browser_url);
 
   const url = `${SCREENPIPE_BASE}/search?${query.toString()}`;
 
@@ -177,4 +224,92 @@ export async function getRecentActivity(
   });
 
   return result.data;
+}
+
+/**
+ * Fetch input events (clicks, keystrokes, app switches, clipboard, scrolls)
+ * from Screenpipe for the given time window. These are the raw interaction
+ * events that form the episodic memory layer.
+ */
+export async function getInputEvents(
+  sinceIso: string,
+  untilIso: string,
+  appName?: string,
+  limit = 300
+): Promise<InputEvent[]> {
+  try {
+    const result = await searchContent({
+      content_type: "input",
+      start_time: sinceIso,
+      end_time: untilIso,
+      app_name: appName,
+      limit,
+    });
+
+    return result.data.map((item) => {
+      const c = (item.content ?? {}) as Record<string, unknown>;
+      const type = (
+        (c.event_type ?? c.type ?? item.type ?? "key") as string
+      ).toLowerCase() as InputEventType;
+
+      return {
+        type: normaliseInputType(type),
+        app_name: item.app_name ?? "",
+        window_name: item.window_name ?? "",
+        timestamp: item.timestamp,
+        text: (c.text ?? c.key_char ?? item.text ?? "") as string | undefined,
+        x: c.x as number | undefined,
+        y: c.y as number | undefined,
+        content: item.content,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function normaliseInputType(raw: string): InputEventType {
+  if (raw.includes("click")) return "click";
+  if (raw.includes("key")) return "key";
+  if (raw.includes("app")) return "app_switch";
+  if (raw.includes("focus")) return "window_focus";
+  if (raw.includes("clip")) return "clipboard";
+  if (raw.includes("scroll")) return "scroll";
+  return "key";
+}
+
+/**
+ * Fetch accessibility tree events — UI element snapshots (buttons, labels,
+ * fields) captured by Screenpipe's accessibility layer for the given window.
+ */
+export async function getAccessibilityEvents(
+  sinceIso: string,
+  untilIso: string,
+  appName?: string,
+  limit = 100
+): Promise<AccessibilityEvent[]> {
+  try {
+    const result = await searchContent({
+      content_type: "accessibility",
+      start_time: sinceIso,
+      end_time: untilIso,
+      app_name: appName,
+      limit,
+    });
+
+    return result.data.map((item) => {
+      const c = (item.content ?? {}) as Record<string, unknown>;
+      return {
+        app_name: item.app_name ?? "",
+        window_name: item.window_name ?? "",
+        timestamp: item.timestamp,
+        text: (c.text ?? item.text ?? "") as string,
+        role: c.role as string | undefined,
+        browser_url: c.browser_url as string | undefined,
+        content: item.content,
+      };
+    });
+  } catch {
+    return [];
+  }
 }

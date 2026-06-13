@@ -37,6 +37,7 @@ import { executeWithComputerUse } from "./computerUse";
 import { promptJSON, FAST_MODEL } from "./openrouter";
 import { showNudgeWindow } from "./nudgeWindow";
 import { setGhostState } from "./ghostState";
+import { getBehaviourProfileText } from "./behaviourProfile";
 
 const POLL_INTERVAL_MS = 10_000;
 const RULE_COOLDOWN_MS = 5 * 60 * 1000; // same rule won't fire more than once per 5 minutes
@@ -173,7 +174,13 @@ async function decideTrigger(
     .map((r) => `  ${r.id}: WHEN ${r.condition} → DO ${r.action}`)
     .join("\n");
 
+  const profile = getBehaviourProfileText();
+  const profileSection = profile
+    ? `\nUser's behavioural profile:\n${profile.slice(0, 1500)}\n`
+    : "";
+
   const prompt = `You are the trigger decider for a workflow automation assistant.
+${profileSection}
 The user's current screen context:
 
 App: ${ctx.app}
@@ -305,12 +312,16 @@ async function dispatch(
     // silent:true suppresses the banner entirely. Use a custom nudge popup instead.
     if (process.platform === "darwin") {
       setGhostState("noticed");
+      const steps = parseSteps(rule.action_steps);
+      const stepPreview = steps.slice(0, 3).map((s) => s.slice(0, 60));
       showNudgeWindow({
         activityId,
         ruleId: rule.id,
         action: rule.action,
         instruction,
         condition: rule.condition,
+        evidenceCount: rule.observed_count,
+        stepPreview: stepPreview.length > 0 ? stepPreview : undefined,
         onDoIt: runDoIt,
         onDismiss: runDismiss,
       });

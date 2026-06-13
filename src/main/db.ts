@@ -136,6 +136,42 @@ function migrate(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_skills_rule ON skills(rule_id);
     CREATE INDEX IF NOT EXISTS idx_skill_runs_skill ON skill_runs(skill_id);
     CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+
+    -- ── Episodic memory: raw interaction events (L2) ──────────────────────────
+    -- Sessions group events separated by > 5-minute idle gaps.
+    CREATE TABLE IF NOT EXISTS sessions (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+      ended_at    TEXT,
+      app         TEXT    NOT NULL DEFAULT '',
+      urls        TEXT    NOT NULL DEFAULT '[]',  -- JSON string[] unique URLs
+      apps        TEXT    NOT NULL DEFAULT '[]',  -- JSON string[] unique apps
+      event_count INTEGER NOT NULL DEFAULT 0,
+      summary     TEXT    NOT NULL DEFAULT ''     -- set after NREM analysis
+    );
+
+    -- Individual interaction events: clicks, keys, navigations, app switches.
+    -- source='screenpipe' means from Screenpipe input/accessibility API.
+    -- source='browser'    means from the browser recorder (has DOM locators).
+    CREATE TABLE IF NOT EXISTS raw_events (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id   INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+      ts           TEXT    NOT NULL DEFAULT (datetime('now')),
+      type         TEXT    NOT NULL,  -- click|key|navigate|fill|app_switch|clipboard
+      app          TEXT    NOT NULL DEFAULT '',
+      url          TEXT,
+      window_name  TEXT,
+      element_role TEXT,              -- AX role or DOM role
+      element_name TEXT,              -- button label / placeholder / link text
+      locators     TEXT,              -- JSON RankedLocator[] (browser source only)
+      value        TEXT,              -- typed text / clipboard (max 300 chars)
+      source       TEXT    NOT NULL DEFAULT 'screenpipe'
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_raw_events_session ON raw_events(session_id);
+    CREATE INDEX IF NOT EXISTS idx_raw_events_ts ON raw_events(ts DESC);
+    CREATE INDEX IF NOT EXISTS idx_raw_events_app ON raw_events(app);
+    CREATE INDEX IF NOT EXISTS idx_sessions_ts ON sessions(started_at DESC);
   `);
 
   // Additive migrations — safe to run on every boot.
@@ -909,4 +945,163 @@ export function dedupRules(): number {
   }
 
   return merged;
+}
+
+// ─── Episodic memory: sessions + raw_events ───────────────────────────────────
+
+export interface Session {
+  id: number;
+  started_at: string;
+  ended_at: string | null;
+  app: string;
+  urls: string;  // JSON
+  apps: string;  // JSON
+  event_count: number;
+  summary: string;
+}
+
+export interface RawEvent {
+  id: number;
+  session_id: number | null;
+  ts: string;
+  type: string;
+  app: string;
+  url: string | null;
+  window_name: string | null;
+  element_role: string | null;
+  element_name: string | null;
+  locators: string | null;  // JSON RankedLocator[]
+  value: string | null;
+  source: string;
+}
+
+export function openSession(app: string): number {
+  const info = getDb()
+    .prepare(
+      `INSERT INTO sessions (app, urls, apps, event_count, summary)
+       VALUES (?, '[]', '[]', 0, '')`
+    )
+    .run(app);
+  return info.lastInsertRowid as number;
+}
+
+export function closeSession(id: number): void {
+  getDb()
+    .prepare("UPDATE sessions SET ended_at = datetime('now') WHERE id = ?")
+    .run(id);
+}
+
+export function updateSession(
+  id: number,
+  patch: { urls?: string[]; apps?: string[]; event_count?: number; summary?: string }
+): void {
+  const db = getDb();
+  const row = db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as Session | undefined;
+  if (!row) return;
+  const urls = patch.urls ? JSON.stringify(patch.urls) : row.urls;
+  const apps = patch.apps ? JSON.stringify(patch.apps) : row.apps;
+  const count = patch.event_count ?? row.event_count;
+  const summary = patch.summary ?? row.summary;
+  db.prepare(
+    "UPDATE sessions SET urls = ?, apps = ?, event_count = ?, summary = ? WHERE id = ?"
+  ).run(urls, apps, count, summary, id);
+}
+
+export function insertRawEvent(event: Omit<RawEvent, "id">): number {
+  const info = getDb()
+    .prepare(
+      `INSERT INTO raw_events
+         (session_id, ts, type, app, url, window_name, element_role,
+          element_name, locators, value, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      event.session_id,
+      event.ts,
+      event.type,
+      event.app,
+      event.url ?? null,
+      event.window_name ?? null,
+      event.element_role ?? null,
+      event.element_name ?? null,
+      event.locators ?? null,
+      event.value ? event.value.slice(0, 300) : null,
+      event.source
+    );
+  return info.lastInsertRowid as number;
+}
+
+export function getSessionsInRange(sinceIso: string, untilIso: string): Session[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE started_at >= ? AND started_at <= ? ORDER BY started_at DESC"
+    )
+    .all(sinceIso, untilIso) as Session[];
+}
+
+export function getRecentSessions(days = 7): Session[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM sessions WHERE started_at >= datetime('now', ?) ORDER BY started_at DESC"
+    )
+    .all(`-${days} days`) as Session[];
+}
+
+export function getRawEventsForSession(sessionId: number): RawEvent[] {
+  return getDb()
+    .prepare("SELECT * FROM raw_events WHERE session_id = ? ORDER BY ts ASC")
+    .all(sessionId) as RawEvent[];
+}
+
+export function getUnsummarisedSessions(): Session[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM sessions
+       WHERE summary = '' AND ended_at IS NOT NULL
+       ORDER BY started_at DESC LIMIT 50`
+    )
+    .all() as Session[];
+}
+
+/** Delete raw events older than `days` days and orphaned sessions. */
+export function pruneRawEvents(days = 90): { events: number; sessions: number } {
+  const db = getDb();
+  const eventsResult = db
+    .prepare("DELETE FROM raw_events WHERE ts < datetime('now', ?)")
+    .run(`-${days} days`);
+  const sessionsResult = db
+    .prepare(
+      `DELETE FROM sessions
+       WHERE ended_at < datetime('now', ?)
+         AND id NOT IN (SELECT DISTINCT session_id FROM raw_events WHERE session_id IS NOT NULL)`
+    )
+    .run(`-${days} days`);
+  return {
+    events: eventsResult.changes,
+    sessions: sessionsResult.changes,
+  };
+}
+
+/** Confidence decay: apply power-law forgetting to rules not recently used. */
+export function applyConfidenceDecay(): number {
+  const db = getDb();
+  const rules = db
+    .prepare("SELECT id, confidence, last_triggered FROM rules WHERE confidence > 0")
+    .all() as Array<{ id: number; confidence: number; last_triggered: string | null }>;
+
+  let updated = 0;
+  const now = Date.now();
+
+  for (const rule of rules) {
+    if (!rule.last_triggered) continue;
+    const daysSince = (now - new Date(rule.last_triggered).getTime()) / 86_400_000;
+    if (daysSince < 1) continue;
+    // Power-law decay: conf * 0.95^days_since. Gentle — 30 days ≈ 21% loss.
+    const decayed = Math.max(0, rule.confidence * Math.pow(0.95, daysSince));
+    if (Math.abs(decayed - rule.confidence) < 0.001) continue;
+    db.prepare("UPDATE rules SET confidence = ? WHERE id = ?").run(decayed, rule.id);
+    updated++;
+  }
+
+  return updated;
 }

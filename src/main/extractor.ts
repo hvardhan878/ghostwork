@@ -8,6 +8,7 @@
 import { getRecentActivity, ContentItem } from "./screenpipe";
 import { promptJSON } from "./openrouter";
 import { upsertWorkflow, upsertRule, getSetting, setSetting } from "./db";
+import { getBehaviourProfileText } from "./behaviourProfile";
 
 // ─── PII stripping ────────────────────────────────────────────────────────────
 
@@ -65,7 +66,12 @@ function buildExtractionPrompt(activityText: string, focusCategories: string[] =
     ? `Only extract workflows related to these categories: ${focusCategories.join(", ")}. Ignore all other activity entirely.\n\n`
     : "";
 
-  return `${categoryInstruction}You are analysing a knowledge worker's computer activity from the last hour.
+  const profile = getBehaviourProfileText();
+  const profileSection = profile
+    ? `EXISTING BEHAVIOURAL PROFILE (use this to avoid duplicating known patterns):\n${profile.slice(0, 2000)}\n\n`
+    : "";
+
+  return `${categoryInstruction}${profileSection}You are analysing a knowledge worker's computer activity from the last hour.
 Your task: extract repeating workflows and inferred behavioural rules.
 
 ACTIVITY DATA:
