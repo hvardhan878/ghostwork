@@ -432,7 +432,7 @@
         </div>
       </div>
       <div class="sidebar">
-        <div class="sidebar-header">Suggestions</div>
+        <div class="sidebar-header">Activity</div>
 
         <!-- Demo action launcher — only shown alongside demo data -->
         <div id="demo-run-panel" style="display:none;padding:12px;border-bottom:1px solid var(--border);">
@@ -449,8 +449,7 @@
           <div id="demo-run-steps" style="display:none;margin-top:10px;"></div>
         </div>
 
-        <div class="sidebar-content" id="sidebar-suggestions">
-          <div class="sidebar-empty">No pending suggestions</div>
+        <div class="sidebar-content" id="sidebar-activity">
         </div>
       </div>
     </div>
@@ -489,16 +488,6 @@
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
         <div class="section-title" style="margin-bottom:0;">Learned workflows</div>
         <div style="display:flex;gap:6px;">
-          <button
-            class="btn-ghost"
-            id="teach-btn"
-            onclick="toggleTeach()"
-            style="border-color:#3a3a5a;"
-          >&#9210; Teach skill</button>
-          <button
-            class="btn-ghost"
-            onclick="api.nudge.test()"
-          >Test nudge</button>
           <button
             class="btn-ghost"
             onclick="loadDiagnostics(this)"
@@ -552,16 +541,6 @@
         <div id="skills-list"></div>
       </div>
 
-      <!-- From recordings: session-derived workflows -->
-      <div id="recordings-section" style="margin-bottom:20px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-          <div class="section-title" style="font-size:12px;margin-bottom:0;">From recordings</div>
-          <span style="font-size:11px;color:var(--text-muted)">Patterns detected in your sessions</span>
-        </div>
-        <div id="recordings-list">
-          <div style="font-size:12px;color:var(--text-dim);padding:8px 0;">No recorded sessions yet — Ghostwork will detect patterns as you work.</div>
-        </div>
-      </div>
 
       <div id="model-list" class="model-list">
         <div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>
@@ -639,7 +618,6 @@
             </div>
             <div class="setting-control">
               <select class="select-field" id="autonomy-select">
-                <option value="suggest">Suggest only</option>
                 <option value="supervised">Supervised (act + notify)</option>
                 <option value="full">Full autonomous</option>
               </select>
@@ -727,7 +705,7 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('view-' + view).classList.add('active');
-    if (view === 'model') { loadModel(); loadSkills(); loadApprovals(); loadReceipt(); loadRecordings(); }
+    if (view === 'model') { loadModel(); loadSkills(); loadApprovals(); loadReceipt(); }
     if (view === 'settings') loadSettings();
     if (view === 'timeline') loadTimeline();
   });
@@ -792,11 +770,11 @@ function renderFeed() {
   list.innerHTML = feedItems.map(item => {
     const tier = item.tier;
     const status = item.status;
-    const showAcceptReject = status === 'pending' && tier === 'suggest';
-    const showUndo = status === 'pending' && tier === 'supervised';
+    const showAcceptReject = false; // suggest tier removed — system acts automatically
+    const showUndo = status === 'pending' && (tier === 'supervised' || tier === 'autonomous');
 
     const statusLabel = {
-      pending:  tier === 'suggest' ? 'waiting' : 'done — undo?',
+      pending:  'done — undo?',
       accepted: 'accepted',
       rejected: 'rejected',
       undone:   'undone',
@@ -940,120 +918,7 @@ async function feedUndo(id) {
   await loadFeed();
 }
 
-// ── Suggestions sidebar ──────────────────────────────────────────────────────
-let suggestions = [];
-
-function addSuggestion(data) {
-  suggestions.push(data);
-  renderSuggestions();
-}
-
-function renderSuggestions() {
-  const el = document.getElementById('sidebar-suggestions');
-  if (suggestions.length === 0) {
-    el.innerHTML = '<div class="sidebar-empty">No pending suggestions</div>';
-    return;
-  }
-  el.innerHTML = suggestions.map((s, i) => {
-    const evidence = Array.isArray(s.evidence) ? s.evidence : [];
-    const evCount = evidence.length;
-    const evRows = evidence.map(e =>
-      `<div class="suggest-ev-row">
-        <span class="suggest-ev-date">${esc(e.date)}</span>
-        <span class="suggest-ev-summary">${esc(e.summary)}</span>
-      </div>`
-    ).join('');
-
-    return `
-    <div class="suggest-card" id="suggest-${i}">
-      <div class="suggest-card-collapsed">
-        <span class="suggest-card-action" title="${esc(s.action)}">${esc(s.action)}</span>
-        <div class="suggest-card-btns" id="suggest-btns-${i}">
-          <button class="btn-acc" onclick="acceptSuggestion(${i})">Do it</button>
-          <button class="btn-rej" onclick="dismissSuggestion(${i})">Dismiss</button>
-        </div>
-      </div>
-      <div class="suggest-card-expanded">
-        <div class="suggest-card-inner">
-          ${evCount > 0
-            ? `<div class="suggest-ev-count">Seen you do this ${evCount} time${evCount !== 1 ? 's' : ''}</div>
-               <div class="suggest-ev-rows">${evRows}</div>`
-            : `<div class="suggest-ev-count" style="color:var(--text-dim)">No history yet</div>`
-          }
-          <button class="btn-never" onclick="neverSuggest(${i})">Never suggest this</button>
-        </div>
-      </div>
-    </div>`;
-  }).join('');
-
-  // Attach hover expand/collapse listeners.
-  suggestions.forEach((_s, i) => {
-    const card = document.getElementById('suggest-' + i);
-    if (!card) return;
-    card.addEventListener('mouseenter', () => card.classList.add('expanded'));
-    card.addEventListener('mouseleave', () => card.classList.remove('expanded'));
-  });
-}
-
-async function acceptSuggestion(i) {
-  const s = suggestions[i];
-  if (!s) return;
-
-  // Show inline progress in the card
-  const btns = document.getElementById('suggest-btns-' + i);
-  if (btns) {
-    btns.innerHTML = `
-      <div style="display:flex;align-items:center;gap:6px;color:var(--amber);font-size:11px;">
-        <div class="exec-spinner"></div>
-        <span id="suggest-step-${i}">Starting…</span>
-      </div>`;
-  }
-
-  // Fire real execution
-  try {
-    const result = await api.execute.task(s.instruction || s.action, `Triggered from suggestion: ${s.condition}`);
-    await api.db.activityStatus(s.id, result.success ? 'accepted' : 'rejected');
-    if (s.ruleId) {
-      if (result.success) await api.db.acceptRule(s.ruleId);
-      else await api.db.correction(s.ruleId, s.action, '', result.error || 'execution failed');
-    }
-    if (btns) {
-      btns.innerHTML = result.success
-        ? `<div style="font-size:11px;color:var(--green);">✓ Done in ${result.steps} steps</div>`
-        : `<div style="font-size:11px;color:var(--red);">✗ ${esc(result.error || 'Failed')}</div>`;
-    }
-    setTimeout(() => {
-      suggestions.splice(i, 1);
-      renderSuggestions();
-      loadFeed();
-    }, 2000);
-  } catch (err) {
-    if (btns) btns.innerHTML = `<div style="font-size:11px;color:var(--red);">✗ ${esc(String(err))}</div>`;
-  }
-}
-async function dismissSuggestion(i) {
-  const s = suggestions[i];
-  if (!s) return;
-  await api.db.activityStatus(s.id, 'rejected');
-  if (s.ruleId) await api.db.correction(s.ruleId, s.action, '', 'dismissed');
-  suggestions.splice(i, 1);
-  renderSuggestions();
-}
-
-async function neverSuggest(i) {
-  const s = suggestions[i];
-  if (!s) return;
-  if (s.ruleId) await api.db.setRuleConfidenceZero(s.ruleId);
-  await api.db.activityStatus(s.id, 'rejected');
-  suggestions.splice(i, 1);
-  renderSuggestions();
-}
-
 // ── Engine events ────────────────────────────────────────────────────────────
-api.on('engine:suggest', (data) => {
-  addSuggestion(data);
-  loadFeed();
-});
 api.on('engine:supervised', (data) => {
   loadFeed();
   if (data.status === 'executing') {
@@ -1080,7 +945,7 @@ let execSteps = [];
 
 function showExecutionPanel(task) {
   execSteps = [];
-  const el = document.getElementById('sidebar-suggestions');
+  const el = document.getElementById('sidebar-activity');
   const panel = document.createElement('div');
   panel.id = 'exec-panel';
   panel.className = 'exec-progress';
@@ -1412,56 +1277,6 @@ async function loadDiagnostics(btn) {
   }
 }
 
-// ── Teach Mode ───────────────────────────────────────────────────────────────
-let teachRecording = false;
-
-function renderTeachBtn() {
-  const btn = document.getElementById('teach-btn');
-  if (!btn) return;
-  if (teachRecording) {
-    btn.innerHTML = '&#9209; Stop recording';
-    btn.style.color = '#ff6b6b';
-    btn.style.borderColor = '#5a2a2a';
-  } else {
-    btn.innerHTML = '&#9210; Teach skill';
-    btn.style.color = '';
-    btn.style.borderColor = '#3a3a5a';
-  }
-}
-
-async function toggleTeach() {
-  const btn = document.getElementById('teach-btn');
-  btn.disabled = true;
-  try {
-    if (!teachRecording) {
-      const res = await api.teach.start();
-      if (res.ok) {
-        teachRecording = true;
-        alert('Recording. Perform the task in Chrome, then hit "Stop recording".');
-      } else {
-        alert('Could not start recording: ' + (res.error || 'unknown error'));
-      }
-    } else {
-      const res = await api.teach.stop();
-      teachRecording = false;
-      if (res.ok) {
-        alert(`Skill saved: "${res.skill.name}" (${res.steps} steps)`);
-        loadSkills();
-      } else {
-        alert('Recording produced no skill: ' + (res.error || 'unknown error'));
-      }
-    }
-  } finally {
-    btn.disabled = false;
-    renderTeachBtn();
-  }
-}
-
-api.on('teach:status', (data) => {
-  teachRecording = !!data.recording;
-  renderTeachBtn();
-  if (data.result && data.result.ok) loadSkills();
-});
 
 // ── Skills ───────────────────────────────────────────────────────────────────
 async function loadSkills() {
@@ -1753,43 +1568,12 @@ async function saveSessionAsSkill(startedAt, endedAt, btn) {
   }
 }
 
-// ── From recordings (Behaviour tab) ──────────────────────────────────────────
-async function loadRecordings() {
-  const list = document.getElementById('recordings-list');
-  if (!list) return;
-  try {
-    const sessions = await api.timeline.sessions(30);
-    if (!sessions || sessions.length === 0) {
-      list.innerHTML = '<div style="font-size:12px;color:var(--text-dim);padding:8px 0;">No recorded sessions yet — Ghostwork will detect patterns as you work.</div>';
-      return;
-    }
-    // Group by dominant app + URL domain patterns
-    const byPattern = {};
-    for (const s of sessions) {
-      const key = s.summary && s.summary.length > 4 ? s.summary.slice(0, 60) : s.dominant_app;
-      if (!key) continue;
-      if (!byPattern[key]) byPattern[key] = { name: key, count: 0, lastSeen: s.started_at, totalEvents: 0 };
-      byPattern[key].count++;
-      byPattern[key].totalEvents += s.event_count || 0;
-      if (s.started_at > byPattern[key].lastSeen) byPattern[key].lastSeen = s.started_at;
-    }
-    const patterns = Object.values(byPattern).sort((a, b) => b.count - a.count).slice(0, 15);
-    list.innerHTML = patterns.map(p => `
-      <div style="display:flex;align-items:center;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;margin-bottom:6px;gap:10px;">
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:12px;color:var(--text);font-weight:500;">${esc(p.name)}</div>
-          <div style="font-size:11px;color:var(--text-muted);margin-top:1px;">Last seen ${fmtDate(p.lastSeen)} · ${p.totalEvents} total events</div>
-        </div>
-        <span style="font-size:11px;color:var(--amber);background:#1a1200;border:1px solid #3a2800;padding:2px 8px;border-radius:10px;flex-shrink:0;">${p.count}× seen</span>
-      </div>`).join('');
-  } catch(e) { console.error('recordings load error', e); }
-}
 
 // ── Init ─────────────────────────────────────────────────────────────────────
 loadFeed();
 checkConnections();
 loadApprovals();
-api.teach.status().then(s => { teachRecording = !!s.recording; renderTeachBtn(); });
+
 setInterval(loadFeed, 15000);          // refresh feed every 15s
 setInterval(checkConnections, 30000);  // re-check connections every 30s
 

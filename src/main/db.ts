@@ -80,7 +80,7 @@ function migrate(db: Database.Database): void {
       rule_id       INTEGER REFERENCES rules(id) ON DELETE SET NULL,
       action_taken  TEXT    NOT NULL,
       confidence    REAL    NOT NULL DEFAULT 0.0,
-      tier          TEXT    NOT NULL DEFAULT 'suggest',  -- suggest | supervised | autonomous
+      tier          TEXT    NOT NULL DEFAULT 'supervised',  -- supervised | autonomous
       status        TEXT    NOT NULL DEFAULT 'pending',  -- pending | accepted | rejected | undone | silent
       user_note     TEXT    NOT NULL DEFAULT ''
     );
@@ -154,18 +154,19 @@ function migrate(db: Database.Database): void {
     -- source='screenpipe' means from Screenpipe input/accessibility API.
     -- source='browser'    means from the browser recorder (has DOM locators).
     CREATE TABLE IF NOT EXISTS raw_events (
-      id           INTEGER PRIMARY KEY AUTOINCREMENT,
-      session_id   INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
-      ts           TEXT    NOT NULL DEFAULT (datetime('now')),
-      type         TEXT    NOT NULL,  -- click|key|navigate|fill|app_switch|clipboard
-      app          TEXT    NOT NULL DEFAULT '',
-      url          TEXT,
-      window_name  TEXT,
-      element_role TEXT,              -- AX role or DOM role
-      element_name TEXT,              -- button label / placeholder / link text
-      locators     TEXT,              -- JSON RankedLocator[] (browser source only)
-      value        TEXT,              -- typed text / clipboard (max 300 chars)
-      source       TEXT    NOT NULL DEFAULT 'screenpipe'
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id       INTEGER REFERENCES sessions(id) ON DELETE CASCADE,
+      ts               TEXT    NOT NULL DEFAULT (datetime('now')),
+      type             TEXT    NOT NULL,  -- click|key|navigate|fill|app_switch|clipboard
+      app              TEXT    NOT NULL DEFAULT '',
+      url              TEXT,
+      window_name      TEXT,
+      element_role     TEXT,              -- AX role or DOM role
+      element_name     TEXT,              -- button label / placeholder / link text
+      locators         TEXT,              -- JSON RankedLocator[] (browser source only)
+      value            TEXT,              -- typed text / clipboard (max 300 chars)
+      source           TEXT    NOT NULL DEFAULT 'screenpipe',
+      prediction_error REAL    DEFAULT NULL  -- 0.0–1.0; high = surprising event (Zoral delta signal)
     );
 
     CREATE INDEX IF NOT EXISTS idx_raw_events_session ON raw_events(session_id);
@@ -179,6 +180,8 @@ function migrate(db: Database.Database): void {
   safeAddColumn(db, 'rules', 'accept_count', "INTEGER NOT NULL DEFAULT 0");
   safeAddColumn(db, 'rules', 'dismiss_count', "INTEGER NOT NULL DEFAULT 0");
   safeAddColumn(db, 'rules', 'action_steps', "TEXT NOT NULL DEFAULT '[]'");
+  safeAddColumn(db, 'rules', 'category', "TEXT NOT NULL DEFAULT 'navigation'");
+  safeAddColumn(db, 'raw_events', 'prediction_error', "REAL DEFAULT NULL");
 
   // One-time wipe for the v2 decision engine: old keyword-era rules carry
   // made-up confidence and no executable steps — start clean and relearn.
@@ -315,6 +318,8 @@ export interface Rule {
   dismiss_count: number;
   /** JSON-serialised string[] of concrete executable steps. */
   action_steps: string;
+  /** One of: navigation | data_transform | communication | search_to_action | scheduled | multi_app | correction */
+  category: string;
 }
 
 /**
@@ -336,7 +341,8 @@ export function upsertRule(
   condition: string,
   action: string,
   confidence: number,
-  actionSteps: string[] = []
+  actionSteps: string[] = [],
+  category = "navigation"
 ): Rule {
   const db = getDb();
   const stepsJson = JSON.stringify(actionSteps);
@@ -373,15 +379,15 @@ export function upsertRule(
     );
     const steps = actionSteps.length > 0 ? stepsJson : existing.action_steps;
     db.prepare(`
-      UPDATE rules SET confidence = ?, observed_count = ?, action_steps = ? WHERE id = ?
-    `).run(newConf, newCount, steps, existing.id);
+      UPDATE rules SET confidence = ?, observed_count = ?, action_steps = ?, category = ? WHERE id = ?
+    `).run(newConf, newCount, steps, category, existing.id);
     return db.prepare("SELECT * FROM rules WHERE id = ?").get(existing.id) as Rule;
   }
 
   const info = db.prepare(`
-    INSERT INTO rules (workflow_id, condition, action, confidence, action_steps)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(workflowId, condition, action, confidence, stepsJson);
+    INSERT INTO rules (workflow_id, condition, action, confidence, action_steps, category)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(workflowId, condition, action, confidence, stepsJson, category);
 
   return db.prepare("SELECT * FROM rules WHERE id = ?").get(info.lastInsertRowid) as Rule;
 }
@@ -435,25 +441,19 @@ export function dismissRule(ruleId: number): void {
 
 /**
  * Autonomy is earned through user feedback, never asserted by the LLM:
- *   - suggest:    the starting tier for every rule
- *   - supervised: >= 3 accepts AND no rejection among the last 5 outcomes
+ *   - supervised: default for all rules (execute + HUD + Cmd+Z undo)
  *   - autonomous: >= 8 accepts AND no rejection among the last 10 outcomes
+ *
+ * There is no "suggest" tier — the system acts, it doesn't ask.
  * (LLM extraction confidence is used only for ranking/pruning.)
  */
 export function earnedTier(rule: Rule): ConfidenceTier {
-  if (rule.accept_count < 3) return "suggest";
-
   const recent = getDb().prepare(`
     SELECT status FROM activity_log
     WHERE rule_id = ? AND status IN ('accepted', 'rejected', 'undone', 'silent')
     ORDER BY timestamp DESC
     LIMIT 10
   `).all(rule.id) as { status: string }[];
-
-  const last5HasRejection = recent
-    .slice(0, 5)
-    .some((r) => r.status === "rejected" || r.status === "undone");
-  if (last5HasRejection) return "suggest";
 
   const last10HasRejection = recent.some(
     (r) => r.status === "rejected" || r.status === "undone"
@@ -519,7 +519,7 @@ export function getEvidenceForRule(workflowId: number, limit = 3): EvidenceEntry
 
 // ─── Activity log ─────────────────────────────────────────────────────────────
 
-export type ConfidenceTier = "suggest" | "supervised" | "autonomous";
+export type ConfidenceTier = "supervised" | "autonomous";
 export type ActivityStatus = "pending" | "accepted" | "rejected" | "undone" | "silent";
 
 export interface ActivityEntry {
@@ -973,6 +973,14 @@ export interface RawEvent {
   locators: string | null;  // JSON RankedLocator[]
   value: string | null;
   source: string;
+  prediction_error: number | null;  // 0.0–1.0; high = surprising event (Zoral delta signal)
+}
+
+/** Update the prediction_error for a raw event after the prediction pass. */
+export function updateRawEventPredictionError(id: number, error: number): void {
+  getDb()
+    .prepare("UPDATE raw_events SET prediction_error = ? WHERE id = ?")
+    .run(Math.max(0, Math.min(1, error)), id);
 }
 
 export function openSession(app: string): number {

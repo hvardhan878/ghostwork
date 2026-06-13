@@ -1,15 +1,13 @@
 /**
  * Ambient ghost state — drives the menu-bar presence.
- *   observing: dim, default
- *   noticed:   a suggestion is waiting
+ *   observing: dim, default (learning silently)
  *   working:   executing a skill right now
- *   recording: teach mode active
  *
  * main.ts registers the actual tray updater; everyone else just calls
  * setGhostState() without importing the tray (avoids circular imports).
  */
 
-export type GhostState = "observing" | "noticed" | "working" | "recording";
+export type GhostState = "observing" | "working";
 
 let current: GhostState = "observing";
 let setter: (state: GhostState) => void = () => {};

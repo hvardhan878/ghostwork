@@ -51,7 +51,7 @@ import { runNightlyConsolidation } from "./consolidation";
 import { seedDemoData } from "./demo";
 import { executeWithComputerUse } from "./computerUse";
 import { startActionEngine, stopActionEngine } from "./actionEngine";
-import { handleNudgeDoIt, handleNudgeDismiss, showTestNudge, showNudgeWindow } from "./nudgeWindow";
+import { showNudgeWindow } from "./nudgeWindow";
 import {
   initScreenpipeManager,
   stopScreenpipeManager,
@@ -63,7 +63,6 @@ import {
   setSkillTrigger,
   SkillTriggerType,
 } from "./db";
-import { startTeaching, stopTeaching, isTeaching } from "./teachMode";
 import {
   pendingApprovals,
   approveAndContinue,
@@ -383,29 +382,6 @@ function registerIpcHandlers(): void {
     return true;
   });
 
-  // ── Nudge popup IPC (macOS suggestion banner) ──
-  ipcMain.handle("nudge:do-it", () => handleNudgeDoIt());
-  ipcMain.handle("nudge:dismiss", () => {
-    handleNudgeDismiss();
-    return true;
-  });
-  ipcMain.handle("nudge:test", () => {
-    showTestNudge();
-    return true;
-  });
-
-  // ── Teach Mode ──
-  ipcMain.handle("teach:start", () => startTeaching());
-  ipcMain.handle("teach:stop", async () => {
-    const result = await stopTeaching();
-    if (result.ok) {
-      syncSkillSchedules();
-      mainWindow?.webContents.send("skills:updated");
-    }
-    return result;
-  });
-  ipcMain.handle("teach:status", () => ({ recording: isTeaching() }));
-
   // ── Skills ──
   ipcMain.handle("skills:list", () => getAllSkills());
   ipcMain.handle("skills:delete", (_e, id: number) => {
@@ -532,15 +508,11 @@ function applyGhostStateToTray(state: GhostState): void {
   if (!tray) return;
   const titles: Record<GhostState, string> = {
     observing: "",
-    noticed: " •",
     working: " …",
-    recording: " REC",
   };
   const tooltips: Record<GhostState, string> = {
     observing: "Ghostwork — observing",
-    noticed: "Ghostwork — noticed something (suggestion waiting)",
     working: "Ghostwork — working (Esc to stop)",
-    recording: "Ghostwork — recording a demonstration",
   };
   try {
     tray.setTitle(titles[state]);
@@ -563,19 +535,6 @@ function createTray(): void {
       },
     },
     { type: "separator" },
-    {
-      label: "Teach a skill (record)",
-      click: async () => {
-        if (isTeaching()) {
-          const result = await stopTeaching();
-          mainWindow?.webContents.send("skills:updated");
-          mainWindow?.webContents.send("teach:status", { recording: false, result });
-        } else {
-          const res = await startTeaching();
-          mainWindow?.webContents.send("teach:status", { recording: res.ok, error: res.error });
-        }
-      },
-    },
     {
       label: "Stop execution (Esc)",
       click: () => requestAbort(),

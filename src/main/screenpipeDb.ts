@@ -363,6 +363,52 @@ export function ftsSearch(
   return results.slice(0, limit);
 }
 
+// ─── FTS top-term detector ────────────────────────────────────────────────────
+
+const TERM_STOPWORDS = new Set([
+  "the","and","for","with","that","this","from","have","been","will","your",
+  "into","are","was","were","they","their","what","when","where","which","who",
+  "com","www","http","https","html","page","site","click","button","window",
+  "chrome","google","apple","user","text","time","date","name","type","file",
+]);
+
+/**
+ * Use Screenpipe's FTS index to find the most frequently mentioned meaningful
+ * terms in a time window. Used to focus the extraction prompt automatically.
+ */
+export async function detectTopTerms(sinceIso: string, untilIso: string, topN = 5): Promise<string[]> {
+  const db = getSpDb();
+  if (!db) return [];
+
+  try {
+    const rows = db.prepare(`
+      SELECT f.full_text
+      FROM frames f
+      WHERE f.timestamp >= ? AND f.timestamp <= ?
+        AND f.full_text IS NOT NULL AND length(f.full_text) > 50
+      ORDER BY f.timestamp DESC
+      LIMIT 40
+    `).all(sinceIso, untilIso) as Array<{ full_text: string }>;
+
+    if (rows.length === 0) return [];
+
+    const combined = rows.map((r) => r.full_text).join(" ").toLowerCase();
+    const wordCounts = new Map<string, number>();
+
+    for (const word of combined.match(/\b[a-z][a-z0-9-]{3,20}\b/g) ?? []) {
+      if (TERM_STOPWORDS.has(word)) continue;
+      wordCounts.set(word, (wordCounts.get(word) ?? 0) + 1);
+    }
+
+    return [...wordCounts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topN)
+      .map(([word]) => word);
+  } catch {
+    return [];
+  }
+}
+
 // ─── Activity summary ─────────────────────────────────────────────────────────
 
 export interface AppActivity {

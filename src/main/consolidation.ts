@@ -238,9 +238,11 @@ async function runRem(): Promise<void> {
       const condLower = rule.condition.toLowerCase();
       const urlsLower = s.urls.toLowerCase();
       const appsLower = s.apps.toLowerCase();
-      return urlsLower.includes("linkedin") && condLower.includes("linkedin") ||
-             urlsLower.includes("gmail") && condLower.includes("gmail") ||
-             appsLower.split('"').some((a) => a.length > 3 && condLower.includes(a.toLowerCase()));
+      // Generic semantic match: any meaningful term from the rule condition
+      // should appear in the session's URLs or apps list.
+      const STOPWORDS = new Set(["when", "user", "the", "and", "for", "with", "that", "from", "this", "have", "been"]);
+      const condTerms = condLower.split(/\W+/).filter(w => w.length > 3 && !STOPWORDS.has(w));
+      return condTerms.some(term => urlsLower.includes(term) || appsLower.includes(term));
     });
 
     if (matchingSessions.length === 0) continue;

@@ -7,13 +7,20 @@
  *  2. Screenpipe DB queryRecentOcr(): OCR-only rows as fallback.
  *  3. Screenpipe REST API: last resort when DB is unavailable.
  *
+ * Extraction uses 7 structured categories (Zoral-inspired):
+ *   navigation, data_transform, communication, search_to_action,
+ *   scheduled, multi_app, correction
+ *
+ * High prediction-error events (surprising moments) are prepended so the
+ * LLM sees the most interesting activity first, regardless of truncation.
+ *
  * All data is PII-stripped before being sent to the LLM.
  */
 
 import { getRecentActivity, ContentItem } from "./screenpipe";
-import { buildActivityText, queryRecentOcr } from "./screenpipeDb";
+import { buildActivityText, queryRecentOcr, detectTopTerms } from "./screenpipeDb";
 import { promptJSON } from "./openrouter";
-import { upsertWorkflow, upsertRule, getSetting, setSetting } from "./db";
+import { upsertWorkflow, upsertRule, getSetting, setSetting, getDb } from "./db";
 import { getBehaviourProfileText } from "./behaviourProfile";
 
 // ─── PII stripping ────────────────────────────────────────────────────────────
@@ -41,23 +48,101 @@ function sanitiseItems(items: ContentItem[]): string {
       return stripPII(`${base}: ${contentText}`);
     })
     .join("\n")
-    .slice(0, 40_000); // keep prompt within reasonable input-token budget
+    .slice(0, 40_000);
 }
 
-// ─── Claude prompt ────────────────────────────────────────────────────────────
+// ─── Step grammar normaliser ──────────────────────────────────────────────────
+// Maps loose LLM-generated step descriptions to the exact grammar that
+// stepRunner.ts and skillEngine.ts can parse deterministically.
+
+const SKIP_STEPS = /^(wait for|scroll down|wait until|look for|check if|make sure|ensure|verify)/i;
+
+export function normaliseStep(raw: string): string | null {
+  const s = raw.trim();
+
+  // Drop steps that are vague instructions, not actions
+  if (SKIP_STEPS.test(s)) return null;
+  if (s.length < 4) return null;
+
+  // navigate / open / go to → open <url>
+  const navMatch = s.match(/^(?:navigate to|go to|open)\s+(https?:\/\/\S+|[a-z0-9][\w.-]+\.[a-z]{2,}(?:\/\S*)?)/i);
+  if (navMatch) return `open ${navMatch[1].startsWith("http") ? navMatch[1] : "https://" + navMatch[1]}`;
+
+  // switch to / activate / focus → switch to <App>
+  const switchMatch = s.match(/^(?:switch to|activate|focus on?)\s+(.+)$/i);
+  if (switchMatch) return `switch to ${switchMatch[1].trim()}`;
+
+  // press enter/tab/escape
+  if (/^press\s+(enter|return)\b/i.test(s)) return "press enter";
+  if (/^press\s+tab\b/i.test(s)) return "press tab";
+  if (/^press\s+escape\b/i.test(s)) return "press escape";
+
+  // wait <N>s — normalise "wait for 2 seconds", "wait 2", etc.
+  const waitMatch = s.match(/^wait\s+(\d+(?:\.\d+)?)/i);
+  if (waitMatch) return `wait ${waitMatch[1]}s`;
+  if (/^wait\s+a\s+(moment|second|bit)/i.test(s)) return "wait 1s";
+
+  // type "..." — already quoted → pass through; bare type → skip if no value
+  const typeMatch = s.match(/^type\s+"(.+)"$/i) ?? s.match(/^type\s+'(.+)'$/i);
+  if (typeMatch) return `type "${typeMatch[1]}"`;
+  // bare type without quotes — LLM didn't give a literal, too vague
+  if (/^type\s+/i.test(s) && !/"/.test(s)) return null;
+
+  // click "X" in App — native app clicks
+  const nativeClick = s.match(/^click\s+(?:the\s+)?"([^"]+)"\s+in\s+(.+)$/i)
+    ?? s.match(/^click\s+(?:on\s+)?(?:the\s+)?["']([^"']+)["']\s+in\s+(.+)$/i);
+  if (nativeClick) return `click "${nativeClick[1]}" in ${nativeClick[2].trim()}`;
+
+  // click "X" — button label only
+  const quotedClick = s.match(/^click\s+(?:on\s+)?(?:the\s+)?"([^"]+)"$/i);
+  if (quotedClick) return `click "${quotedClick[1]}"`;
+
+  // click <description> — extract the meaningful noun phrase
+  const bareClick = s.match(/^click\s+(?:on\s+)?(?:the\s+)?(.+)$/i);
+  if (bareClick) {
+    const label = bareClick[1]
+      .replace(/\s+(button|link|icon|tab|item|field|option|checkbox|radio)\s*$/i, "")
+      .trim();
+    if (label.length >= 2 && label.length <= 80) return `click "${label}"`;
+    return null;
+  }
+
+  // Pass through if it already matches the expected grammar
+  if (/^(open https?:\/\/|switch to |click "|type "|press (enter|tab|escape)|wait \d)/i.test(s)) {
+    return s;
+  }
+
+  return null; // Drop anything unrecognised
+}
+
+function normaliseSteps(steps: string[]): string[] {
+  return steps.map(normaliseStep).filter((s): s is string => s !== null);
+}
+
+// ─── 7-category extraction prompt ─────────────────────────────────────────────
+
+export type WorkflowCategory =
+  | "navigation"
+  | "data_transform"
+  | "communication"
+  | "search_to_action"
+  | "scheduled"
+  | "multi_app"
+  | "correction";
 
 interface ExtractedRule {
   condition: string;
   action: string;
   confidence: number;
   evidence: string[];
-  /** Concrete executable steps, e.g. ["open linkedin.com", "search for {job title}"] */
   steps: string[];
+  category: WorkflowCategory;
 }
 
 interface ExtractedWorkflow {
   name: string;
   description: string;
+  category: WorkflowCategory;
   steps: string[];
   confidence: number;
   rules: ExtractedRule[];
@@ -69,64 +154,67 @@ interface ExtractionResult {
 
 function buildExtractionPrompt(activityText: string, focusCategories: string[] = []): string {
   const categoryInstruction = focusCategories.length > 0
-    ? `Only extract workflows related to these categories: ${focusCategories.join(", ")}. Ignore all other activity entirely.\n\n`
+    ? `Only extract workflows related to these topics: ${focusCategories.join(", ")}. Ignore all other activity.\n\n`
     : "";
 
   const profile = getBehaviourProfileText();
   const profileSection = profile
-    ? `EXISTING BEHAVIOURAL PROFILE (use this to avoid duplicating known patterns):\n${profile.slice(0, 2000)}\n\n`
+    ? `EXISTING BEHAVIOURAL PROFILE (avoid duplicating known patterns):\n${profile.slice(0, 1500)}\n\n`
     : "";
 
-  return `${categoryInstruction}${profileSection}You are analysing a knowledge worker's computer activity from the last 2 hours.
-Your task: extract repeating workflows and inferred behavioural rules.
-
-The activity data below combines:
-- [SCREEN] sections: full page accessibility text + OCR (~3.5 KB per frame capture)
-- User actions: exact keystrokes typed and UI elements clicked with timestamps
-- [MIC]/[AUDIO]: spoken words transcribed from microphone or system audio
-- CLIPBOARD: text that was copied or pasted (high-signal intent indicator)
+  return `${categoryInstruction}${profileSection}You are analysing a knowledge worker's computer activity.
+Your task: extract repeating workflows and inferred behavioural rules, tagged by category.
 
 ACTIVITY DATA:
 ${activityText}
 
-Return a JSON object with this exact schema (no extra keys):
+Category definitions (assign the BEST fit — pick exactly one):
+  navigation       URL sequences, tab switching, app switching habits
+  data_transform   copy from X → paste/reformat into Y (e.g. copy email → paste into CRM)
+  communication    what triggers the user to open email/Slack/messages and what they send
+  search_to_action search for X → always ends with specific action Y
+  scheduled        happens at the same time each day or after same trigger sequence
+  multi_app        workflow that crosses two or more app boundaries
+  correction       things the user repeatedly fixes, redoes, or undoes (high learning signal)
+
+Return a JSON object with this exact schema:
 {
   "workflows": [
     {
-      "name": "short workflow name",
-      "description": "one sentence describing what this workflow accomplishes",
-      "steps": ["step 1", "step 2", "step 3"],
+      "name": "short workflow name (3–6 words)",
+      "description": "one sentence: what this workflow accomplishes",
+      "category": "<one of the 7 categories above>",
+      "steps": ["step 1", "step 2"],
       "confidence": 0.0,
       "rules": [
         {
-          "condition": "when X happens",
-          "action": "do Y",
+          "condition": "observable screen state that triggers this (app, URL, page content)",
+          "action": "what to do — specific and actionable",
+          "category": "<same category as parent workflow>",
           "confidence": 0.0,
-          "evidence": ["raw observation 1", "raw observation 2"],
-          "steps": ["concrete step 1", "concrete step 2", "concrete step 3"]
+          "evidence": ["raw observation 1 (no PII)"],
+          "steps": ["concrete step 1", "concrete step 2"]
         }
       ]
     }
   ]
 }
 
-Rules:
-- Only include workflows observed at least twice in this session
-- Confidence is 0.0–1.0; use 0.3–0.5 for first observations
-- Rules must be specific and actionable, not vague
-- If no patterns found, return {"workflows":[]}
-- Strip any personal data from evidence strings
-- Focus on app-switching patterns, repeated sequences, conditional behaviours
-- "condition" must describe an observable screen state (app, website, page content) so it can be checked against what's on screen right now
-- "steps" must use ONLY this exact step grammar, one action per step (this is machine-parsed — do not deviate):
-    open <full-url>                  e.g. "open https://www.linkedin.com/search/results/people/?keywords=operations%20manager"
-    switch to <App Name>             e.g. "switch to Google Chrome"
-    click <element description>      e.g. "click the Connect button on the first profile result"
-    click "<button name>" in <App>   for NATIVE apps only, e.g. "click \\"New Note\\" in Notes"
-    type "<literal text>"            e.g. "type \\"operations manager fintech\\""
+Constraints:
+- Only include workflows observed at least TWICE in the data
+- Confidence: 0.3–0.5 for first observations, 0.6–0.8 for clearly repeated patterns
+- "condition" must describe what is CURRENTLY VISIBLE on screen — not past or future state
+- Steps use ONLY this exact grammar (machine-parsed, do not deviate):
+    open <full-url>                   e.g. open https://linkedin.com/in/someone
+    switch to <App Name>              e.g. switch to Google Chrome
+    click "<label>"                   e.g. click "Connect"
+    click "<label>" in <App>          native apps only, e.g. click "New Note" in Notes
+    type "<literal text>"             e.g. type "operations manager fintech"
     press enter | press tab | press escape
-    wait <N>s                        e.g. "wait 2s"
-  URLs must be complete (include https:// and the full path/query observed). Use {braces} placeholders only inside type/click text for values that vary per run, e.g. "type \\"{job_title}\\""`;
+    wait <N>s                         e.g. wait 2s
+- Use {placeholder} ONLY inside type/click values for per-run variables
+- If no patterns found, return {"workflows":[]}
+- Strip all personal data (names, emails, phone numbers) from evidence strings`;
 }
 
 // ─── Focus category helpers ───────────────────────────────────────────────────
@@ -140,17 +228,15 @@ export function parseFocusCategories(raw: string): string[] {
   }
 }
 
-// Well-known domain → category keyword mappings so URL-based activity isn't
-// filtered out just because the OCR text didn't happen to contain the keyword.
 const DOMAIN_CATEGORY_HINTS: Record<string, string[]> = {
-  "linkedin":  ["linkedin", "crm", "outreach"],
-  "gmail":     ["email", "inbox"],
-  "mail":      ["email", "inbox"],
-  "salesforce":["crm", "reporting"],
-  "hubspot":   ["crm"],
-  "notion":    ["reporting"],
-  "airtable":  ["reporting", "crm"],
-  "slack":     ["email", "inbox"],
+  "linkedin":   ["linkedin", "crm", "outreach"],
+  "gmail":      ["email", "inbox"],
+  "mail":       ["email", "inbox"],
+  "salesforce": ["crm", "reporting"],
+  "hubspot":    ["crm"],
+  "notion":     ["reporting"],
+  "airtable":   ["reporting", "crm"],
+  "slack":      ["email", "inbox"],
 };
 
 function focusCategoryKeywords(categories: string[]): string[] {
@@ -165,23 +251,52 @@ function filterByFocusCategories(items: ContentItem[], categories: string[]): Co
 
   return items.filter((item) => {
     const haystack = [item.app_name, item.window_name, item.text?.slice(0, 500)]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
+      .filter(Boolean).join(" ").toLowerCase();
 
     if (keywords.some((kw) => haystack.includes(kw))) return true;
 
-    // Domain-hint fallback: if the window title contains a known service name
-    // and that service maps to one of our focus categories, keep the item.
     const windowLower = (item.window_name ?? "").toLowerCase();
     for (const [domain, hints] of Object.entries(DOMAIN_CATEGORY_HINTS)) {
-      if (windowLower.includes(domain) && hints.some((h) => keywords.includes(h))) {
-        return true;
-      }
+      if (windowLower.includes(domain) && hints.some((h) => keywords.includes(h))) return true;
     }
 
     return false;
   });
+}
+
+// ─── High-delta event prepending ──────────────────────────────────────────────
+// Pull the most "surprising" raw events (high prediction_error) from the DB
+// and prepend them as a short highlight section so the LLM sees them even if
+// the full activity text gets truncated.
+
+function buildHighDeltaSection(sinceIso: string, untilIso: string): string {
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT ts, type, app, url, element_name, value, prediction_error
+      FROM raw_events
+      WHERE ts >= ? AND ts <= ?
+        AND prediction_error >= 0.7
+      ORDER BY prediction_error DESC
+      LIMIT 20
+    `).all(sinceIso, untilIso) as Array<{
+      ts: string; type: string; app: string; url: string | null;
+      element_name: string | null; value: string | null; prediction_error: number;
+    }>;
+
+    if (rows.length === 0) return "";
+
+    const lines = rows.map((r) =>
+      `[HIGH-SIGNAL Δ=${r.prediction_error.toFixed(2)}] ${r.ts.slice(11, 19)} ${r.type} in ${r.app}` +
+      (r.url ? ` @ ${r.url.slice(0, 60)}` : "") +
+      (r.element_name ? ` → "${r.element_name.slice(0, 40)}"` : "") +
+      (r.value ? ` = "${r.value.slice(0, 60)}"` : "")
+    );
+
+    return `## High-Surprise Events (learn from these especially)\n${lines.join("\n")}\n\n`;
+  } catch {
+    return "";
+  }
 }
 
 // ─── Extraction job ───────────────────────────────────────────────────────────
@@ -194,12 +309,19 @@ export async function runExtractionJob(): Promise<void> {
   const since6h = new Date(now.getTime() - 6 * 3600_000).toISOString();
   const nowIso = now.toISOString();
 
+  // ── FTS pre-filter: detect top topics to focus extraction ─────────────────
+  let topTerms: string[] = [];
+  try {
+    topTerms = await detectTopTerms(since2h, nowIso, 5);
+    if (topTerms.length > 0) {
+      console.log(`[extractor] FTS top terms: ${topTerms.join(", ")}`);
+    }
+  } catch { /* FTS not available */ }
+
   // ── Primary: Screenpipe DB buildActivityText ──────────────────────────────
-  // Combines frames.full_text (~3.5 KB/frame), typed events, audio, clipboard.
   let activityText = buildActivityText(since2h, nowIso);
 
   if (!activityText || activityText.length < 200) {
-    // Expand window if recent activity is sparse
     activityText = buildActivityText(since6h, nowIso);
     if (activityText.length >= 200) {
       console.log("[extractor] Using 6-hour window from Screenpipe DB");
@@ -237,9 +359,7 @@ export async function runExtractionJob(): Promise<void> {
 
     if (items.length > 0) {
       const focusCategories = parseFocusCategories(getSetting("focus_categories", "[]"));
-      if (focusCategories.length > 0) {
-        items = filterByFocusCategories(items, focusCategories);
-      }
+      if (focusCategories.length > 0) items = filterByFocusCategories(items, focusCategories);
       activityText = sanitiseItems(items);
       console.log(`[extractor] REST fallback: ${items.length} items`);
     }
@@ -250,9 +370,16 @@ export async function runExtractionJob(): Promise<void> {
     return;
   }
 
+  // ── Prepend high-delta events (Zoral: weight surprising moments) ──────────
+  const highDelta = buildHighDeltaSection(since2h, nowIso);
+  const combinedText = (highDelta + activityText).slice(0, 45_000);
+
   const focusCats = parseFocusCategories(getSetting("focus_categories", "[]"));
+  // Merge FTS-detected top terms into focus categories for this extraction run.
+  const allFocusCats = [...new Set([...focusCats, ...topTerms])];
+
   const result = await promptJSON<ExtractionResult>(
-    buildExtractionPrompt(stripPII(activityText), focusCats)
+    buildExtractionPrompt(stripPII(combinedText), allFocusCats)
   );
 
   if (!result || !Array.isArray(result.workflows)) {
@@ -274,12 +401,14 @@ export async function runExtractionJob(): Promise<void> {
 
     for (const rule of wf.rules ?? []) {
       if (!rule.condition || !rule.action) continue;
-      const steps = Array.isArray(rule.steps) ? rule.steps.filter(Boolean) : [];
-      upsertRule(workflow.id, rule.condition, rule.action, rule.confidence, steps);
+      const rawSteps = Array.isArray(rule.steps) ? rule.steps.filter(Boolean) : [];
+      const steps = normaliseSteps(rawSteps);
+      const category = rule.category ?? wf.category ?? "navigation";
+      upsertRule(workflow.id, rule.condition, rule.action, rule.confidence, steps, category);
     }
 
     console.log(
-      `[extractor]   ✓ "${wf.name}" — ${wf.rules?.length ?? 0} rules, confidence ${wf.confidence.toFixed(2)}`
+      `[extractor]   ✓ "${wf.name}" [${wf.category}] — ${wf.rules?.length ?? 0} rules, confidence ${wf.confidence.toFixed(2)}`
     );
   }
 

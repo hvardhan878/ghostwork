@@ -2,16 +2,16 @@
  * Action engine v2 — perception + LLM trigger decision.
  *
  * Every 10s it builds a UserContext (frontmost app + browser tab via
- * AppleScript, supplementary Screenpipe OCR) — local and free.  When the
- * context meaningfully changes and stays stable for one tick, a single cheap
- * LLM call decides whether any learned rule applies right now.
+ * AppleScript, supplementary Screenpipe OCR + audio + clipboard) — local and free.
+ * When the context meaningfully changes and stays stable for one tick, a single
+ * cheap LLM call decides whether any learned rule applies right now.
  *
- * Autonomy is earned, never asserted: every rule starts at "suggest" and
- * only climbs to supervised/autonomous through accepted executions
- * (see earnedTier in db.ts).
+ * Autonomy is earned, never asserted. All rules start at "supervised"
+ * (executes + HUD + Cmd+Z undo) and climb to "autonomous" through accepted
+ * executions. There is no "suggest" tier — the system acts, it doesn't ask.
  */
 
-import { BrowserWindow, Notification } from "electron";
+import { BrowserWindow } from "electron";
 import {
   getCurrentContext,
   contextKey,
@@ -35,9 +35,9 @@ import {
 } from "./db";
 import { executeWithComputerUse } from "./computerUse";
 import { promptJSON, FAST_MODEL } from "./openrouter";
-import { showNudgeWindow } from "./nudgeWindow";
 import { setGhostState } from "./ghostState";
 import { getBehaviourProfileText } from "./behaviourProfile";
+import { queryClipboardEvents, queryAudioTranscriptions } from "./screenpipeDb";
 
 const POLL_INTERVAL_MS = 10_000;
 const RULE_COOLDOWN_MS = 5 * 60 * 1000; // same rule won't fire more than once per 5 minutes
@@ -61,8 +61,6 @@ let lastEvaluatedKey: string | null = null; // key we last sent to the LLM
 let lastTriggerCallAt = 0;
 let evaluating = false;
 const ruleFiredAt = new Map<number, number>(); // ruleId → timestamp of last dispatch
-// Keep notification refs alive until dismissed — otherwise macOS GCs them before show.
-const activeNotifications = new Map<number, Notification>();
 
 export function startActionEngine(getWindow: () => BrowserWindow | null): void {
   if (pollTimer) return;
@@ -148,7 +146,7 @@ async function tick(getWindow: () => BrowserWindow | null): Promise<void> {
       return;
     }
 
-    const tier = capTier(earnedTier(rule), getSetting("autonomy_override", "suggest"));
+    const tier = capTier(earnedTier(rule), getSetting("autonomy_override", "supervised"));
     console.log(`[engine] LLM verdict: rule #${rule.id} applies — "${decision.reason}"`);
     console.log(`[engine] DISPATCHING rule #${rule.id} tier=${tier} (accepts=${rule.accept_count}, dismissals=${rule.dismiss_count}): "${rule.action.slice(0, 80)}"`);
 
@@ -170,14 +168,35 @@ async function decideTrigger(
   ctx: UserContext,
   rules: Rule[]
 ): Promise<TriggerDecision | null> {
-  const ruleList = rules
-    .map((r) => `  ${r.id}: WHEN ${r.condition} → DO ${r.action}`)
+  // Only surface rules whose category is plausible for the current context.
+  // For example, skip 'communication' rules when the user is in a code editor.
+  const filteredRules = filterRulesByContext(ctx, rules);
+  if (filteredRules.length === 0) return { rule_id: null, reason: "no rules match context category" };
+
+  const ruleList = filteredRules
+    .map((r) => `  ${r.id} [${(r as Rule & { category?: string }).category ?? "general"}]: WHEN ${r.condition} → DO ${r.action}`)
     .join("\n");
 
   const profile = getBehaviourProfileText();
   const profileSection = profile
-    ? `\nUser's behavioural profile:\n${profile.slice(0, 1500)}\n`
+    ? `\nUser's behavioural profile:\n${profile.slice(0, 800)}\n`
     : "";
+
+  // Rich context: pull recent clipboard + audio from Screenpipe (strongest intent signals).
+  const now = new Date().toISOString();
+  const since2min = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  const since30s = new Date(Date.now() - 30 * 1000).toISOString();
+
+  let clipboardCtx = "";
+  let audioCtx = "";
+  try {
+    const clips = queryClipboardEvents(since2min, now, 1);
+    if (clips.length > 0) clipboardCtx = clips[0].text_content?.slice(0, 200) ?? "";
+  } catch { /* Screenpipe DB may not be ready */ }
+  try {
+    const audio = queryAudioTranscriptions(since30s, now, 3);
+    if (audio.length > 0) audioCtx = audio.map((a) => a.transcription).join(" ").slice(0, 200);
+  } catch { /* Screenpipe DB may not be ready */ }
 
   const prompt = `You are the trigger decider for a workflow automation assistant.
 ${profileSection}
@@ -186,14 +205,17 @@ The user's current screen context:
 App: ${ctx.app}
 ${ctx.url ? `URL: ${ctx.url}` : ""}
 ${ctx.windowTitle ? `Window/tab title: ${ctx.windowTitle}` : ""}
-${ctx.ocrText ? `Visible text (OCR excerpt): ${ctx.ocrText.slice(0, 500)}` : ""}
+${ctx.ocrText ? `Visible text (OCR excerpt): ${ctx.ocrText.slice(0, 400)}` : ""}
+${clipboardCtx ? `Recent clipboard paste: ${clipboardCtx}` : ""}
+${audioCtx ? `Recent speech (30s): ${audioCtx}` : ""}
 
-Learned rules (id: WHEN condition → DO action):
+Learned rules (id [category]: WHEN condition → DO action):
 ${ruleList}
 
 Does exactly one of these rules clearly apply to what the user is doing RIGHT NOW?
 Be strict: only match if the current context genuinely satisfies the rule's condition.
 Do not match rules about future or past activity, and do not stretch a rule to fit.
+Clipboard and speech are strong intent signals — weight them heavily.
 
 Reply with JSON only:
 {"rule_id": <number or null>, "reason": "<one short sentence>"}`;
@@ -201,11 +223,28 @@ Reply with JSON only:
   return promptJSON<TriggerDecision>(prompt, FAST_MODEL);
 }
 
+// Category-based pre-filter: removes rules that can't possibly apply given the current app/URL.
+// Prevents "communication" rules firing when the user is writing code, etc.
+const CATEGORY_BLOCKED: Record<string, (ctx: UserContext) => boolean> = {
+  communication: (ctx) =>
+    /xcode|terminal|vscode|cursor|intellij|pycharm|vim|emacs|sublime/i.test(ctx.app),
+  search_to_action: (ctx) =>
+    !ctx.url && !/chrome|safari|firefox|arc|edge/i.test(ctx.app),
+};
+
+function filterRulesByContext(ctx: UserContext, rules: Rule[]): Rule[] {
+  return rules.filter((r) => {
+    const cat = (r as Rule & { category?: string }).category ?? "general";
+    const blocker = CATEGORY_BLOCKED[cat];
+    return !blocker || !blocker(ctx);
+  });
+}
+
 // ─── Tier handling ───────────────────────────────────────────────────────────
 
 function capTier(tier: ConfidenceTier, override: string): ConfidenceTier {
-  if (override === "suggest") return "suggest";
-  if (override === "supervised" && tier === "autonomous") return "supervised";
+  // "suggest" override treated as supervised (suggest tier removed)
+  if (override === "supervised" || override === "suggest") return "supervised";
   return tier;
 }
 
@@ -256,111 +295,10 @@ async function dispatch(
   );
 
   const win = getWindow();
-  const evidence = getEvidenceForRule(rule.workflow_id, 3);
   const instruction = executionInstruction(rule);
   const execOpts = { steps: parseSteps(rule.action_steps), ruleId: rule.id };
 
-  if (tier === "suggest") {
-    const payload = {
-      id: activityId,
-      ruleId: rule.id,
-      workflowId: rule.workflow_id,
-      action: rule.action,
-      condition: rule.condition,
-      instruction, // steps-augmented execution instruction
-      confidence,
-      evidence,
-    };
-
-    win?.webContents.send("engine:suggest", payload);
-    console.log(`[engine] Suggestion queued: "${rule.action}"`);
-
-    const runDoIt = () => {
-      console.log(`[engine] "Do it" for rule #${rule.id}: "${rule.action.slice(0, 80)}"`);
-      setGhostState("working");
-      return executeWithComputerUse(
-        instruction,
-        `Suggestion: ${rule.condition}`,
-        () => {},
-        execOpts
-      )
-        .then((result) => {
-          if (result.success) {
-            console.log(`[engine] Execution ✓ (${result.steps} steps, mode=${result.mode ?? "?"})`);
-            updateActivityStatus(activityId, "accepted");
-            acceptRule(rule.id);
-          } else {
-            console.error(`[engine] Execution ✗ — ${result.error}`);
-            updateActivityStatus(activityId, "rejected");
-            recordCorrection(rule.id, rule.action, "", "execution failed");
-          }
-        })
-        .catch((err) => console.error("[engine] Do it error:", err))
-        .finally(() => setGhostState("observing"));
-    };
-
-    const runDismiss = () => {
-      console.log(`[engine] Dismissed rule #${rule.id}`);
-      updateActivityStatus(activityId, "rejected");
-      dismissRule(rule.id);
-      recordCorrection(rule.id, rule.action, "", "dismissed");
-      activeNotifications.delete(activityId);
-      setGhostState("observing");
-    };
-
-    // macOS: native Notification action buttons require a code-signed app and
-    // silent:true suppresses the banner entirely. Use a custom nudge popup instead.
-    if (process.platform === "darwin") {
-      setGhostState("noticed");
-      const steps = parseSteps(rule.action_steps);
-      const stepPreview = steps.slice(0, 3).map((s) => s.slice(0, 60));
-      showNudgeWindow({
-        activityId,
-        ruleId: rule.id,
-        action: rule.action,
-        instruction,
-        condition: rule.condition,
-        evidenceCount: rule.observed_count,
-        stepPreview: stepPreview.length > 0 ? stepPreview : undefined,
-        onDoIt: runDoIt,
-        onDismiss: runDismiss,
-      });
-    } else if (Notification.isSupported()) {
-      const n = new Notification({
-        title: "Ghostwork suggestion",
-        body: rule.action.slice(0, 100),
-        actions: [
-          { type: "button", text: "Do it" },
-          { type: "button", text: "Dismiss" },
-        ],
-        closeButtonText: "Dismiss",
-      });
-
-      activeNotifications.set(activityId, n);
-
-      n.on("action", (_event: Electron.Event, index: number) => {
-        if (index === 0) runDoIt();
-        else runDismiss();
-      });
-
-      n.on("click", () => {
-        win?.show();
-        win?.focus();
-      });
-
-      n.on("failed", () => {
-        console.error("[engine] Native notification failed to show");
-        activeNotifications.delete(activityId);
-      });
-
-      n.on("close", () => activeNotifications.delete(activityId));
-
-      n.show();
-      console.log("[engine] Native notification shown");
-    } else {
-      console.warn("[engine] Notifications not supported on this platform");
-    }
-  } else if (tier === "supervised") {
+  if (tier === "supervised") {
     setSetting(
       "pending_undo",
       JSON.stringify({ activityId, ruleId: rule.id, action: rule.action, timestamp: Date.now() })
@@ -453,17 +391,17 @@ async function dispatch(
   }
 }
 
-function showNotification(
-  title: string,
-  body: string,
-  activityId: number
-): void {
-  if (!Notification.isSupported()) return;
-  const n = new Notification({ title, body });
-  n.on("click", () => updateActivityStatus(activityId, "undone"));
-  n.on("close", () => activeNotifications.delete(activityId));
-  activeNotifications.set(activityId, n);
-  n.show();
+function showNotification(title: string, body: string, _activityId: number): void {
+  // Post-execution toast via macOS notification — uses Electron's Notification API.
+  try {
+    const { Notification: ElNotification } = require("electron") as typeof import("electron");
+    if (!(ElNotification as unknown as { isSupported?: () => boolean }).isSupported?.()) return;
+    const n = new ElNotification({ title, body });
+    (n as unknown as { show: () => void }).show?.();
+  } catch {
+    // Notifications unavailable — log to console only.
+    console.log(`[engine] ${title}: ${body}`);
+  }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
