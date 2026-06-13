@@ -81,6 +81,8 @@ contextBridge.exposeInMainWorld("ghostwork", {
     pinWorkflow: (id: number, pinned: boolean) =>
       ipcRenderer.invoke("db:pin-workflow", id, pinned),
 
+    allRules: () => ipcRenderer.invoke("db:all-rules"),
+    boostRule: (id: number) => ipcRenderer.invoke("db:boost-rule", id),
     deleteRule: (id: number) => ipcRenderer.invoke("db:delete-rule", id),
     updateRuleCondition: (id: number, condition: string) =>
       ipcRenderer.invoke("db:update-rule-condition", id, condition),

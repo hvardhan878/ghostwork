@@ -252,6 +252,22 @@ function registerIpcHandlers(): void {
     acceptRule(id);
     return true;
   });
+
+  // Returns all rules joined with workflow name + computed tier — for the rule review UI.
+  ipcMain.handle("db:all-rules", () => {
+    const { rules } = getDiagnostics();
+    return rules.map((r) => ({
+      ...r,
+      category: (r as unknown as { category?: string }).category ?? "navigation",
+      tier: r.accept_count >= 5 ? "autonomous" : "supervised",
+    }));
+  });
+
+  // Manual accept boost — lets the user vouch for a rule without waiting for it to fire.
+  ipcMain.handle("db:boost-rule", (_e, id: number) => {
+    acceptRule(id);
+    return true;
+  });
   ipcMain.handle(
     "db:correction",
     (_e, ruleId: number, expected: string, actual: string, note: string) => {

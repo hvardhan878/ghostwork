@@ -254,34 +254,96 @@
 
     /* ── Behaviour model ── */
     .model-list { display:flex; flex-direction:column; gap:10px; }
+
+    /* Legacy workflow-card — kept for compatibility */
     .workflow-card {
       background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden;
     }
-    .workflow-header {
-      display:flex; align-items:center; gap:10px; padding:14px 16px; cursor:pointer;
-      transition:background .15s; user-select:none;
-    }
-    .workflow-header:hover { background:var(--surface2); }
-    .workflow-name { flex:1; font-size:13px; color:var(--text); }
-    .workflow-meta { display:flex; align-items:center; gap:8px; }
-    .obs-count { font-size:11px; color:var(--text-muted); }
-    .chevron { font-size:10px; color:var(--text-dim); transition:transform .2s; }
-    .workflow-card.open .chevron { transform:rotate(90deg); }
-
     .workflow-body { display:none; border-top:1px solid var(--border); padding:12px 16px; }
     .workflow-card.open .workflow-body { display:block; }
-
-    .workflow-desc {
-      font-size:12px; color:var(--text-muted); margin-bottom:12px; line-height:1.5;
-    }
+    .workflow-desc { font-size:12px; color:var(--text-muted); margin-bottom:12px; line-height:1.5; }
     .workflow-desc-edit {
       width:100%; background:var(--bg); border:1px solid var(--border); border-radius:6px;
       padding:6px 10px; color:var(--text); font-size:12px; font-family:var(--font);
       resize:none; outline:none; margin-bottom:8px;
     }
-    .workflow-desc-edit:focus { border-color:var(--border-light); }
+    .workflow-footer-btns { display:flex; gap:6px; }
 
-    .rules-list { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
+    /* ── Rule review cards ── */
+    .rules-summary {
+      display:flex; align-items:center; gap:12px; padding:10px 14px; margin-bottom:4px;
+      background:var(--surface); border:1px solid var(--border); border-radius:8px;
+      font-size:11px; color:var(--text-muted);
+    }
+    .rules-summary-num { font-size:16px; font-weight:600; color:var(--text); margin-right:2px; }
+    .rules-summary-sep { color:var(--border-light); }
+
+    .rule-card {
+      background:var(--surface); border:1px solid var(--border); border-radius:8px;
+      padding:14px 16px; display:flex; flex-direction:column; gap:10px;
+      transition:border-color .2s;
+    }
+    .rule-card.autonomous { border-color:#1a4020; }
+    .rule-card-top { display:flex; align-items:center; gap:8px; }
+    .cat-badge {
+      font-size:9px; font-weight:700; letter-spacing:0.1em; text-transform:uppercase;
+      padding:2px 7px; border-radius:10px; flex-shrink:0;
+    }
+    .cat-navigation    { background:#0c1a3a; color:#60a5fa; border:1px solid #1e3a6a; }
+    .cat-data_transform{ background:#1a0c3a; color:#a78bfa; border:1px solid #3a1a6a; }
+    .cat-communication { background:#0a2010; color:#22c55e; border:1px solid #1a4020; }
+    .cat-search_to_action { background:#2a1000; color:#fb923c; border:1px solid #5a2000; }
+    .cat-scheduled     { background:#2a1f00; color:#facc15; border:1px solid #5a4000; }
+    .cat-multi_app     { background:#001a2a; color:#22d3ee; border:1px solid #003a5a; }
+    .cat-correction    { background:#2a0a0a; color:#f87171; border:1px solid #5a1a1a; }
+    .cat-other         { background:var(--bg); color:var(--text-dim); border:1px solid var(--border); }
+
+    .tier-badge-auto {
+      font-size:9px; font-weight:700; letter-spacing:0.1em; text-transform:uppercase;
+      padding:2px 7px; border-radius:10px; background:#0a2010; color:#22c55e; border:1px solid #1a4020;
+    }
+    .tier-badge-sup {
+      font-size:9px; font-weight:700; letter-spacing:0.1em; text-transform:uppercase;
+      padding:2px 7px; border-radius:10px; background:var(--bg); color:var(--text-dim); border:1px solid var(--border);
+    }
+    .rule-wf-name {
+      font-size:10px; color:var(--text-dim); margin-left:auto;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:160px;
+    }
+    .rule-card-body { display:flex; flex-direction:column; gap:6px; }
+    .rule-when {
+      font-size:11px; color:var(--text-dim);
+      display:flex; gap:6px; align-items:flex-start; line-height:1.5;
+    }
+    .rule-when-label { color:var(--text-muted); font-weight:600; flex-shrink:0; }
+    .rule-do {
+      font-size:12px; color:var(--text);
+      display:flex; gap:6px; align-items:flex-start; line-height:1.5;
+    }
+    .rule-do-label { color:#22c55e; font-weight:600; flex-shrink:0; }
+    .rule-card-footer {
+      display:flex; align-items:center; gap:10px; padding-top:6px;
+      border-top:1px solid var(--border);
+    }
+    .rule-progress { display:flex; align-items:center; gap:6px; flex:1; }
+    .rule-dots { display:flex; gap:4px; }
+    .rule-dot {
+      width:8px; height:8px; border-radius:50%; background:var(--border);
+      transition:background .3s;
+    }
+    .rule-dot.filled { background:#22c55e; }
+    .rule-progress-label { font-size:10px; color:var(--text-dim); white-space:nowrap; }
+    .rule-meta { font-size:10px; color:var(--text-dim); display:flex; gap:10px; }
+    .rule-btns { display:flex; gap:4px; margin-left:auto; }
+
+    .btn-boost {
+      padding:4px 10px; border-radius:6px; border:1px solid #1a4020;
+      background:#0a1a10; color:#22c55e; font-size:10px; font-weight:600; cursor:pointer;
+      font-family:var(--font); transition:all .15s; white-space:nowrap;
+    }
+    .btn-boost:hover { background:#0f2a18; border-color:#22c55e; }
+    .btn-boost:active { transform:scale(0.97); }
+
     .rule-row {
       background:var(--bg); border:1px solid var(--border); border-radius:6px;
       padding:10px 12px; display:flex; flex-direction:column; gap:4px;
@@ -292,7 +354,7 @@
     .rule-obs { font-size:10px; color:var(--text-dim); }
     .rule-actions-row { margin-left:auto; display:flex; gap:4px; }
 
-    .workflow-footer-btns { display:flex; gap:6px; }
+    .model-empty { text-align:center; color:var(--text-dim); padding:60px 0; font-size:13px; }
     .btn-ghost {
       padding:5px 12px; border-radius:6px; border:1px solid var(--border);
       background:none; color:var(--text-muted); font-size:11px; cursor:pointer;
@@ -486,7 +548,7 @@
   <div class="view" id="view-model">
     <div class="scroll">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
-        <div class="section-title" style="margin-bottom:0;">Learned workflows</div>
+        <div class="section-title" style="margin-bottom:0;">Learned rules</div>
         <div style="display:flex;gap:6px;">
           <button
             class="btn-ghost"
@@ -543,7 +605,7 @@
 
 
       <div id="model-list" class="model-list">
-        <div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>
+        <div class="model-empty">No rules learned yet. Ghostwork will populate this as it observes your work.</div>
       </div>
     </div>
   </div>
@@ -982,116 +1044,159 @@ function hideExecutionPanel() {
 }
 
 // ── Behaviour model view ─────────────────────────────────────────────────────
+
+const CATEGORY_LABELS = {
+  navigation: 'navigation',
+  data_transform: 'transform',
+  communication: 'comms',
+  search_to_action: 'search→act',
+  scheduled: 'scheduled',
+  multi_app: 'multi-app',
+  correction: 'correction',
+};
+
+function catClass(cat) {
+  const known = ['navigation','data_transform','communication','search_to_action','scheduled','multi_app','correction'];
+  return known.includes(cat) ? 'cat-' + cat : 'cat-other';
+}
+
+function catLabel(cat) {
+  return CATEGORY_LABELS[cat] || cat || 'general';
+}
+
+function renderDots(acceptCount) {
+  const MAX = 5;
+  let html = '<div class="rule-dots">';
+  for (let i = 0; i < MAX; i++) {
+    html += `<div class="rule-dot${i < acceptCount ? ' filled' : ''}"></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
 async function loadModel() {
   const list = document.getElementById('model-list');
   try {
-    const workflows = await api.db.workflows();
-    if (!workflows || workflows.length === 0) {
-      list.innerHTML = '<div class="model-empty">No workflows learned yet. Ghostwork will populate this as it observes.</div>';
+    const rules = await api.db.allRules();
+    if (!rules || rules.length === 0) {
+      list.innerHTML = '<div class="model-empty">No rules learned yet.<br><span style="font-size:11px;color:var(--text-dim)">Use your apps normally and click "Extract now" to kick off the first extraction.</span></div>';
       return;
     }
 
-    const isDemo = await api.settings.get('demo_seeded', '').then(v => v === '1');
-    const hasRealData = await api.settings.get('first_extraction_done', '').then(v => v === '1');
-    const showDemoChips = isDemo && !hasRealData;
+    // Sort: autonomous first, then by accept_count desc, then confidence desc
+    const sorted = [...rules].sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier === 'autonomous' ? -1 : 1;
+      if (b.accept_count !== a.accept_count) return b.accept_count - a.accept_count;
+      return b.confidence - a.confidence;
+    });
 
-    // Load rules for each workflow
-    const withRules = await Promise.all(
-      workflows.map(async wf => ({
-        ...wf,
-        rules: await api.db.rulesForWorkflow(wf.id)
-      }))
-    );
+    const autoCount = sorted.filter(r => r.tier === 'autonomous').length;
+    const supCount = sorted.length - autoCount;
 
-    list.innerHTML = (showDemoChips ? `
-      <div style="padding:10px 14px;margin-bottom:12px;background:#0e1a0e;
-          border:1px solid #1a3a1a;border-radius:8px;
-          font-size:11px;color:#505050;display:flex;align-items:center;gap:8px;">
-        <span style="font-size:10px;font-weight:700;letter-spacing:0.1em;color:#22c55e;
-            padding:2px 7px;background:#0a2010;border:1px solid #1a4020;border-radius:10px;">
-          DEMO
-        </span>
-        This is a sample workflow. Real workflows appear here as Ghostwork observes you.
-      </div>` : '') +
-    withRules.map(wf => `
-      <div class="workflow-card" id="wf-${wf.id}">
-        <div class="workflow-header" onclick="toggleWorkflow(${wf.id})">
-          ${wf.pinned ? '<span style="color:var(--amber);font-size:11px;">📌</span>' : ''}
-          <span class="workflow-name">${esc(wf.name)}</span>
-          <div class="workflow-meta">
-            <span class="confidence-badge ${confClass(wf.confidence)}">${confLabel(wf.confidence)}</span>
-            ${showDemoChips ? '<span class="demo-chip">DEMO</span>' : ''}
-            <span class="obs-count">${wf.observed_count}×</span>
-            <span class="chevron">▶</span>
+    const summary = `
+      <div class="rules-summary">
+        <span><span class="rules-summary-num">${sorted.length}</span> rules</span>
+        <span class="rules-summary-sep">·</span>
+        <span style="color:#22c55e;"><span class="rules-summary-num" style="color:#22c55e;">${autoCount}</span> autonomous</span>
+        <span class="rules-summary-sep">·</span>
+        <span><span class="rules-summary-num">${supCount}</span> supervised</span>
+        <span style="margin-left:auto;font-size:10px;">Boost a rule to manually vouch for it (+1 accept)</span>
+      </div>`;
+
+    const cards = sorted.map(r => {
+      const isAuto = r.tier === 'autonomous';
+      const accepts = Math.min(r.accept_count || 0, 5);
+      const toGo = Math.max(0, 5 - accepts);
+      const progressLabel = isAuto
+        ? '✓ autonomous'
+        : toGo === 0
+          ? 'threshold reached'
+          : `${toGo} more accept${toGo === 1 ? '' : 's'} to autonomous`;
+      const lastSeen = r.last_triggered
+        ? `last fired ${timeAgo(r.last_triggered)}`
+        : 'never fired';
+
+      return `
+        <div class="rule-card${isAuto ? ' autonomous' : ''}" id="rule-card-${r.id}">
+          <div class="rule-card-top">
+            <span class="cat-badge ${catClass(r.category)}">${catLabel(r.category)}</span>
+            ${isAuto
+              ? '<span class="tier-badge-auto">autonomous</span>'
+              : '<span class="tier-badge-sup">supervised</span>'}
+            <span class="confidence-badge ${confClass(r.confidence)}" style="margin-left:4px;">${Math.round(r.confidence * 100)}%</span>
+            <span class="rule-wf-name" title="${esc(r.workflow_name || '')}">${esc(r.workflow_name || 'ungrouped')}</span>
           </div>
-        </div>
-        <div class="workflow-body" id="wf-body-${wf.id}">
-          <div class="workflow-desc" id="wf-desc-${wf.id}">${esc(wf.description)}</div>
-          <div class="rules-list" id="wf-rules-${wf.id}">
-            ${wf.rules.map(r => `
-              <div class="rule-row" id="rule-${r.id}">
-                <div class="rule-cond">When: ${esc(r.condition)}</div>
-                <div class="rule-action">→ ${esc(r.action)}</div>
-                <div class="rule-footer">
-                  <span class="confidence-badge ${confClass(r.confidence)}">${confLabel(r.confidence)}</span>
-                  <span class="rule-obs">${r.observed_count}× obs · ${r.correction_count} corrections</span>
-                  <div class="rule-actions-row">
-                    <button class="btn-sm" onclick="editRule(${r.id}, ${esc(JSON.stringify(r.condition))})">Edit</button>
-                    <button class="btn-sm reject" onclick="deleteRule(${r.id}, ${wf.id})">Delete</button>
-                  </div>
-                </div>
-              </div>`).join('') || '<div style="color:var(--text-dim);font-size:12px;">No rules yet</div>'}
+          <div class="rule-card-body">
+            <div class="rule-when">
+              <span class="rule-when-label">WHEN</span>
+              <span>${esc(r.condition)}</span>
+            </div>
+            <div class="rule-do">
+              <span class="rule-do-label">DO</span>
+              <span>${esc(r.action)}</span>
+            </div>
           </div>
-          <div class="workflow-footer-btns">
-            <button class="btn-ghost" onclick="editWorkflowDesc(${wf.id}, ${JSON.stringify(esc(wf.description))})">Edit description</button>
-            <button class="btn-ghost ${wf.pinned ? 'pin-active' : ''}" onclick="togglePin(${wf.id}, ${!wf.pinned})">
-              ${wf.pinned ? 'Unpin' : 'Pin'}
-            </button>
-            <button class="btn-ghost danger" onclick="deleteWorkflow(${wf.id})">Delete workflow</button>
+          <div class="rule-card-footer">
+            <div class="rule-progress">
+              ${renderDots(accepts)}
+              <span class="rule-progress-label">${progressLabel}</span>
+            </div>
+            <div class="rule-meta">
+              <span>${r.observed_count || 0}× obs</span>
+              <span>${lastSeen}</span>
+            </div>
           </div>
-        </div>
-      </div>`).join('');
+          <div style="display:flex;gap:6px;align-items:center;">
+            ${!isAuto ? `<button class="btn-boost" onclick="boostRule(${r.id})">+ Accept</button>` : ''}
+            <button class="btn-ghost" onclick="editRule(${r.id}, ${JSON.stringify(r.condition)})" style="font-size:10px;padding:3px 9px;">Edit trigger</button>
+            <button class="btn-ghost danger" onclick="deleteRuleCard(${r.id})" style="font-size:10px;padding:3px 9px;">Delete</button>
+            ${r.confidence > 0 ? `<button class="btn-ghost danger" onclick="muteRule(${r.id})" style="font-size:10px;padding:3px 9px;" title="Mute — stop this rule from ever firing">Mute</button>` : '<span style="font-size:10px;color:var(--text-dim);padding:3px 6px;">muted</span>'}
+          </div>
+        </div>`;
+    }).join('');
+
+    list.innerHTML = summary + cards;
   } catch(e) {
-    list.innerHTML = '<div class="model-empty">Error loading model.</div>';
+    list.innerHTML = '<div class="model-empty">Error loading rules.</div>';
     console.error('model load error', e);
   }
 }
 
-function toggleWorkflow(id) {
-  const card = document.getElementById('wf-' + id);
-  card.classList.toggle('open');
+function timeAgo(isoStr) {
+  const ms = Date.now() - new Date(isoStr).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 2) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
 }
 
-async function deleteWorkflow(id) {
-  if (!confirm('Delete this workflow and all its rules?')) return;
-  await api.db.deleteWorkflow(id);
+async function boostRule(ruleId) {
+  await api.db.boostRule(ruleId);
+  loadModel();
+}
+
+async function deleteRuleCard(ruleId) {
+  await api.db.deleteRule(ruleId);
+  // Animate out
+  const card = document.getElementById('rule-card-' + ruleId);
+  if (card) {
+    card.style.opacity = '0';
+    card.style.transition = 'opacity 0.2s';
+    setTimeout(() => loadModel(), 220);
+  } else {
+    loadModel();
+  }
+}
+
+async function muteRule(ruleId) {
+  await api.db.setRuleConfidenceZero(ruleId);
   loadModel();
 }
 
 async function deleteRule(ruleId, wfId) {
   await api.db.deleteRule(ruleId);
-  loadModel();
-}
-
-async function togglePin(wfId, pin) {
-  await api.db.pinWorkflow(wfId, pin);
-  loadModel();
-}
-
-function editWorkflowDesc(wfId, currentDesc) {
-  const descEl = document.getElementById('wf-desc-' + wfId);
-  descEl.innerHTML = `
-    <textarea class="workflow-desc-edit" rows="3">${currentDesc}</textarea>
-    <div style="display:flex;gap:6px;">
-      <button class="btn-ghost" onclick="saveWorkflowDesc(${wfId})">Save</button>
-      <button class="btn-ghost" onclick="loadModel()">Cancel</button>
-    </div>`;
-}
-
-async function saveWorkflowDesc(wfId) {
-  const ta = document.querySelector('#wf-desc-' + wfId + ' textarea');
-  if (!ta) return;
-  await api.db.updateWorkflowDesc(wfId, ta.value);
   loadModel();
 }
 
