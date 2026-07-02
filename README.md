@@ -9,6 +9,25 @@ Ghostwork runs silently in the background, learns how you work from observation 
 
 ---
 
+## Free Screenpipe GUI
+
+Screenpipe's desktop app moved to a paid model ($25/month). Ghostwork works with the **free Screenpipe CLI** and provides a full open-source GUI layer on top:
+
+| Feature | Ghostwork (free) | Screenpipe desktop ($25/mo) |
+|---|---|---|
+| Timeline view | ✅ | ✅ |
+| Natural language search | ✅ | ✅ |
+| App usage analytics | ✅ | ✅ |
+| macOS workflow automation | ✅ | ❌ |
+| Learns from observation | ✅ | ❌ |
+| Runs autonomously | ✅ | ❌ |
+| Local / no cloud | ✅ | ✅ |
+| Open source | ✅ GPL-3.0 | Source-available |
+
+Ghostwork does everything the paid Screenpipe GUI does, plus it automates the workflows it discovers — for free.
+
+---
+
 ## What it does
 
 Ghostwork watches every interaction across every app on your Mac (via [Screenpipe](https://github.com/mediar-ai/screenpipe)), builds a rich memory of your work patterns, and surfaces automations the moment they're relevant.
