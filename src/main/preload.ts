@@ -63,6 +63,10 @@ contextBridge.exposeInMainWorld("ghostwork", {
       ipcRenderer.invoke("screenpipe:search", query, sinceIso),
   },
 
+  analytics: {
+    appUsage: (days?: number) => ipcRenderer.invoke("analytics:app-usage", days ?? 7),
+  },
+
   profile: {
     refresh: () => ipcRenderer.invoke("profile:refresh"),
   },

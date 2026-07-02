@@ -363,6 +363,40 @@ export function ftsSearch(
   return results.slice(0, limit);
 }
 
+// ─── App usage analytics ─────────────────────────────────────────────────────
+
+export interface AppUsageRow { app_name: string; event_count: number; first_seen: string; last_seen: string; }
+export interface DayAppRow { day: string; app_name: string; event_count: number; }
+
+export function appUsageAnalytics(days = 7): { byApp: AppUsageRow[]; byDay: DayAppRow[] } {
+  const db = getSpDb();
+  if (!db) return { byApp: [], byDay: [] };
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  const excluded = ["Ghostwork", "Electron", "Cursor", ""];
+  const ph = excluded.map(() => "?").join(",");
+  try {
+    const byApp = db.prepare(`
+      SELECT app_name, COUNT(*) AS event_count,
+             MIN(timestamp) AS first_seen, MAX(timestamp) AS last_seen
+      FROM frames
+      WHERE timestamp > ? AND app_name NOT IN (${ph}) AND app_name IS NOT NULL
+      GROUP BY app_name ORDER BY event_count DESC LIMIT 20
+    `).all(since, ...excluded) as AppUsageRow[];
+
+    const byDay = db.prepare(`
+      SELECT strftime('%Y-%m-%d', timestamp) AS day, app_name, COUNT(*) AS event_count
+      FROM frames
+      WHERE timestamp > ? AND app_name NOT IN (${ph}) AND app_name IS NOT NULL
+      GROUP BY day, app_name ORDER BY day DESC, event_count DESC
+    `).all(since, ...excluded) as DayAppRow[];
+
+    return { byApp, byDay };
+  } catch (err) {
+    console.warn("[screenpipeDb] appUsageAnalytics error:", err);
+    return { byApp: [], byDay: [] };
+  }
+}
+
 // ─── FTS top-term detector ────────────────────────────────────────────────────
 
 const TERM_STOPWORDS = new Set([

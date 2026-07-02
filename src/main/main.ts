@@ -83,6 +83,7 @@ import {
   queryAudioTranscriptions,
   queryRecentFrameTexts,
   ftsSearch,
+  appUsageAnalytics,
 } from "./screenpipeDb";
 
 let mainWindow: BrowserWindow | null = null;
@@ -467,7 +468,12 @@ function registerIpcHandlers(): void {
 
   // ── FTS keyword search across all Screenpipe content ──
   ipcMain.handle("screenpipe:search", (_e, query: string, sinceIso?: string) => {
-    return ftsSearch(query, sinceIso, 20);
+    return ftsSearch(query, sinceIso, 50);
+  });
+
+  // ── App usage analytics ──
+  ipcMain.handle("analytics:app-usage", (_e, days: number = 7) => {
+    return appUsageAnalytics(days);
   });
 
   // ── Behaviour profile ──

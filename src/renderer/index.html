@@ -451,6 +451,8 @@
     <nav class="nav">
       <button class="nav-btn active" data-view="feed">Activity</button>
       <button class="nav-btn" data-view="timeline">Timeline</button>
+      <button class="nav-btn" data-view="search">Search</button>
+      <button class="nav-btn" data-view="analytics">Analytics</button>
       <button class="nav-btn" data-view="model">Behaviour</button>
       <button class="nav-btn" data-view="settings">Settings</button>
     </nav>
@@ -540,6 +542,46 @@
       </div>
       <div id="timeline-list">
         <div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading sessions…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Search view ─────────────────────────────────────────────────────── -->
+  <div class="view" id="view-search">
+    <div class="scroll">
+      <div style="margin-bottom:16px;">
+        <div class="section-title" style="margin-bottom:10px;">Search</div>
+        <div style="display:flex;gap:8px;">
+          <input id="search-input" type="text" placeholder="Search across everything you've seen…"
+            style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:13px;outline:none;"
+            onkeydown="if(event.key==='Enter')runSearch()"
+          />
+          <select id="search-days" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--text);font-size:12px;">
+            <option value="1">Today</option>
+            <option value="7" selected>7 days</option>
+            <option value="30">30 days</option>
+          </select>
+          <button class="btn-ghost" onclick="runSearch()" style="padding:8px 14px;">Search</button>
+        </div>
+      </div>
+      <div id="search-results"></div>
+    </div>
+  </div>
+
+  <!-- ── Analytics view ──────────────────────────────────────────────────── -->
+  <div class="view" id="view-analytics">
+    <div class="scroll">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+        <div class="section-title" style="margin-bottom:0;">Analytics</div>
+        <select id="analytics-days" onchange="loadAnalytics()"
+          style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--text);font-size:12px;">
+          <option value="7" selected>Last 7 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
+      </div>
+      <div id="analytics-content">
+        <div style="color:var(--text-muted);font-size:12px;padding:20px 0;">Loading…</div>
       </div>
     </div>
   </div>
@@ -770,6 +812,8 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     if (view === 'model') { loadModel(); loadSkills(); loadApprovals(); loadReceipt(); }
     if (view === 'settings') loadSettings();
     if (view === 'timeline') loadTimeline();
+    if (view === 'search') document.getElementById('search-input').focus();
+    if (view === 'analytics') loadAnalytics();
   });
 });
 
@@ -1496,6 +1540,99 @@ async function loadReceipt() {
 }
 
 api.on('receipt:ready', loadReceipt);
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+async function runSearch() {
+  const query = document.getElementById('search-input').value.trim();
+  const days = parseInt(document.getElementById('search-days').value, 10);
+  const el = document.getElementById('search-results');
+  if (!query) { el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">Enter a search term above.</div>'; return; }
+  el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">Searching…</div>';
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  const results = await api.screenpipe.search(query, since).catch(() => []);
+  if (!results.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">No results found.</div>';
+    return;
+  }
+  const sourceIcon = { frame: '🖥', ui_event: '🖱', audio: '🎙', element: '📋' };
+  el.innerHTML = results.map(r => `
+    <div style="padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:8px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-size:11px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;padding:2px 7px;color:var(--text-muted);">${r.app_name || 'Unknown'}</span>
+        <span style="font-size:10px;color:var(--text-dim);">${sourceIcon[r.source] || ''} ${r.source.replace('_', ' ')}</span>
+        <span style="font-size:10px;color:var(--text-dim);margin-left:auto;">${timeAgo(r.timestamp)}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text);line-height:1.5;white-space:pre-wrap;word-break:break-word;">${r.text.slice(0, 300).replace(/</g,'&lt;')}${r.text.length > 300 ? '…' : ''}</div>
+      ${r.browser_url ? `<div style="font-size:10px;color:var(--text-dim);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${r.browser_url}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+
+async function loadAnalytics() {
+  const days = parseInt(document.getElementById('analytics-days')?.value || '7', 10);
+  const el = document.getElementById('analytics-content');
+  el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">Loading…</div>';
+  const { byApp, byDay } = await api.analytics.appUsage(days).catch(() => ({ byApp: [], byDay: [] }));
+  if (!byApp.length) {
+    el.innerHTML = '<div style="color:var(--text-muted);font-size:12px;">No activity data yet. Keep Screenpipe running and check back later.</div>';
+    return;
+  }
+
+  // Top apps bar chart
+  const maxCount = byApp[0].event_count;
+  const appColors = ['#6366f1','#8b5cf6','#06b6d4','#10b981','#f59e0b','#ef4444','#ec4899','#84cc16'];
+  const topAppsHtml = byApp.slice(0, 10).map((r, i) => {
+    const pct = Math.round((r.event_count / maxCount) * 100);
+    return `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        <div style="width:110px;font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0;">${r.app_name}</div>
+        <div style="flex:1;background:var(--surface2);border-radius:4px;height:8px;overflow:hidden;">
+          <div style="width:${pct}%;height:100%;background:${appColors[i % appColors.length]};border-radius:4px;"></div>
+        </div>
+        <div style="width:50px;font-size:11px;color:var(--text-muted);text-align:right;">${r.event_count.toLocaleString()}</div>
+      </div>`;
+  }).join('');
+
+  // Daily breakdown table — top 5 apps per day
+  const days_list = [...new Set(byDay.map(r => r.day))].sort().reverse().slice(0, days);
+  const topApps = byApp.slice(0, 5).map(r => r.app_name);
+  const byDayMap = {};
+  byDay.forEach(r => {
+    if (!byDayMap[r.day]) byDayMap[r.day] = {};
+    byDayMap[r.day][r.app_name] = r.event_count;
+  });
+
+  const tableRows = days_list.map(day => {
+    const cells = topApps.map(app => {
+      const count = byDayMap[day]?.[app] || 0;
+      return `<td style="text-align:right;padding:4px 10px;font-size:11px;color:${count ? 'var(--text)' : 'var(--text-dim)'};">${count ? count.toLocaleString() : '—'}</td>`;
+    }).join('');
+    const label = new Date(day + 'T12:00:00').toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric' });
+    return `<tr><td style="padding:4px 10px;font-size:11px;color:var(--text-muted);white-space:nowrap;">${label}</td>${cells}</tr>`;
+  }).join('');
+
+  const tableHeaders = topApps.map(app =>
+    `<th style="text-align:right;padding:4px 10px;font-size:11px;color:var(--text-muted);font-weight:500;white-space:nowrap;max-width:100px;overflow:hidden;text-overflow:ellipsis;">${app}</th>`
+  ).join('');
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px;">Top apps by activity</div>
+      ${topAppsHtml}
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px;">Daily breakdown</div>
+      <div style="overflow-x:auto;">
+        <table style="width:100%;border-collapse:collapse;">
+          <thead><tr><th style="padding:4px 10px;font-size:11px;color:var(--text-muted);font-weight:500;text-align:left;">Date</th>${tableHeaders}</tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
 
 // ── Timeline ─────────────────────────────────────────────────────────────────
 let tlExpandedSession = null;
